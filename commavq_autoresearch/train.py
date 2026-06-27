@@ -81,12 +81,22 @@ class SwiGLUMLP(nn.Module):
     def forward(self, x):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+        
+    def forward(self, x):
+        variance = x.pow(2).mean(-1, keepdim=True)
+        return x * torch.rsqrt(variance + self.eps) * self.weight
+
 class Block(nn.Module):
     def __init__(self, n_embd, n_head, block_size):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(n_embd)
+        self.ln_1 = RMSNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, block_size)
-        self.ln_2 = nn.LayerNorm(n_embd)
+        self.ln_2 = RMSNorm(n_embd)
         self.mlp = SwiGLUMLP(n_embd)
         
     def forward(self, x):
@@ -102,8 +112,9 @@ class GPT(nn.Module):
             wfe = FrameEmbedding(vocab_size, token_embd_dim, n_embd),
             wpe = nn.Embedding(block_size, n_embd),
             h = nn.ModuleList([Block(n_embd, n_head, block_size) for _ in range(n_layer)]),
-            ln_f = nn.LayerNorm(n_embd)
+            ln_f = RMSNorm(n_embd)
         ))
+
         self.lm_head = FrameHead(n_embd, token_embd_dim)
         self.block_size = block_size
         
