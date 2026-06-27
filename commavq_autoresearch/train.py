@@ -188,8 +188,9 @@ def train():
     val_loader = Dataloader(VAL_BIN, BATCH_SIZE, MAX_SEQ_LEN)
     
     # Optimizer and FP16 GradScaler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, fused=True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95), fused=True)
     scaler = torch.amp.GradScaler('cuda')
+
     
     if master_process:
         print(f"Starting training (DDP: {ddp}, Time Budget: {TIME_BUDGET}s)...")
