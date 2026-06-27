@@ -50,6 +50,33 @@ class FrameHead(nn.Module):
         logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
         return logits
 
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000):
+        super().__init__()
+        self.dim = dim
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.max_seq_len_cached = max_position_embeddings
+        t = torch.arange(self.max_seq_len_cached, dtype=torch.float32)
+        freqs = torch.outer(t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+        
+    def _rotate_half(self, x):
+        x1 = x[..., :x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2:]
+        return torch.cat((-x2, x1), dim=-1)
+        
+    def forward(self, q, k, seq_len):
+        device = q.device
+        cos = self.cos_cached[:seq_len, :].unsqueeze(0).unsqueeze(1).to(device)
+        sin = self.sin_cached[:seq_len, :].unsqueeze(0).unsqueeze(1).to(device)
+        
+        q_embed = (q * cos) + (self._rotate_half(q) * sin)
+        k_embed = (k * cos) + (self._rotate_half(k) * sin)
+        return q_embed, k_embed
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, n_embd, n_head, block_size):
         super().__init__()
@@ -57,6 +84,7 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
         self.n_head = n_head
         self.n_embd = n_embd
+        self.rotary_emb = RotaryEmbedding(n_embd // n_head)
         
     def forward(self, x):
         B, T, C = x.size()
@@ -64,6 +92,9 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        
+        # Apply RoPE
+        q, k = self.rotary_emb(q, k, T)
         
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
@@ -100,7 +131,6 @@ class GPT(nn.Module):
         super().__init__()
         self.transformer = nn.ModuleDict(dict(
             wfe = FrameEmbedding(vocab_size, token_embd_dim, n_embd),
-            wpe = nn.Embedding(block_size, n_embd),
             h = nn.ModuleList([Block(n_embd, n_head, block_size) for _ in range(n_layer)]),
             ln_f = nn.LayerNorm(n_embd)
         ))
@@ -108,11 +138,7 @@ class GPT(nn.Module):
         self.block_size = block_size
         
     def forward(self, idx):
-        device = idx.device
-        t = idx.size(1)
-        pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)
-        
-        x = self.transformer.wfe(idx) + self.transformer.wpe(pos)
+        x = self.transformer.wfe(idx)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
@@ -121,6 +147,7 @@ class GPT(nn.Module):
         wte_weight = self.transformer.wfe.wte.weight
         logits = self.lm_head(x, wte_weight)
         return logits
+
 
 # ---------------------------------------------------------------------------
 # Training Execution
