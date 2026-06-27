@@ -5,18 +5,20 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, FRAME_DIM, TRAIN_BIN, VAL_BIN, Dataloader, evaluate_loss
 
 # ---------------------------------------------------------------------------
 # Hyperparameters (agent modifies these)
 # ---------------------------------------------------------------------------
-N_LAYER = 4
-N_HEAD = 6
-N_EMBD = 192
-TOKEN_EMBD_DIM = 32
-BATCH_SIZE = 64
-LEARNING_RATE = 1e-3
+N_LAYER = 6
+N_HEAD = 8
+N_EMBD = 256
+TOKEN_EMBD_DIM = 64
+BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
+LEARNING_RATE = 8e-4     # Slightly adjusted for larger batch size
 WEIGHT_DECAY = 0.01
 
 # ---------------------------------------------------------------------------
@@ -106,7 +108,7 @@ class GPT(nn.Module):
             x = block(x)
         x = self.transformer.ln_f(x)
         
-        # Classifier with tied weights
+        # Tied weights classifier
         wte_weight = self.transformer.wfe.wte.weight
         logits = self.lm_head(x, wte_weight)
         return logits
@@ -115,13 +117,30 @@ class GPT(nn.Module):
 # Training Execution
 # ---------------------------------------------------------------------------
 def train():
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    # Setup DDP
+    ddp = int(os.environ.get('RANK', -1)) != -1
+    if ddp:
+        dist.init_process_group(backend='nccl')
+        ddp_rank = int(os.environ['RANK'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        device = f'cuda:{ddp_local_rank}'
+        torch.cuda.set_device(device)
+        master_process = ddp_rank == 0
+    else:
+        ddp_rank = 0
+        ddp_local_rank = 0
+        device = 'cuda'
+        master_process = True
+
+    torch.manual_seed(42 + ddp_rank)
+    torch.cuda.manual_seed(42 + ddp_rank)
     torch.set_float32_matmul_precision("high")
     
     # Initialize model
-    model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).cuda()
+    model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).to(device)
     model = torch.compile(model)
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
     
     # Setup data loaders
     train_loader = Dataloader(TRAIN_BIN, BATCH_SIZE, MAX_SEQ_LEN)
@@ -130,7 +149,8 @@ def train():
     # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, fused=True)
     
-    print(f"Starting training (Time Budget: {TIME_BUDGET}s)...")
+    if master_process:
+        print(f"Starting training (DDP: {ddp}, Time Budget: {TIME_BUDGET}s)...")
     t_start = time.time()
     step = 0
     
@@ -149,20 +169,26 @@ def train():
         step += 1
         elapsed = time.time() - t_start
         
-        if step % 50 == 0:
+        if master_process and step % 50 == 0:
             print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s")
             
         if elapsed >= TIME_BUDGET:
             break
             
-    print("Training finished. Evaluating...")
-    val_loss, val_bpt, comp_ratio = evaluate_loss(model, val_loader)
-    
-    print("\n--- RESULTS ---")
-    print(f"val_loss: {val_loss:.6f}")
-    print(f"val_bpt: {val_bpt:.6f}")
-    print(f"comp_ratio: {comp_ratio:.6f}")
-    print(f"num_params: {sum(p.numel() for p in model.parameters()):,}")
+    if master_process:
+        print("Training finished. Evaluating...")
+        # Unwrap model for evaluation if using DDP
+        raw_model = model.module if ddp else model
+        val_loss, val_bpt, comp_ratio = evaluate_loss(raw_model, val_loader)
+        
+        print("\n--- RESULTS ---")
+        print(f"val_loss: {val_loss:.6f}")
+        print(f"val_bpt: {val_bpt:.6f}")
+        print(f"comp_ratio: {comp_ratio:.6f}")
+        print(f"num_params: {sum(p.numel() for p in raw_model.parameters()):,}")
+
+    if ddp:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     train()

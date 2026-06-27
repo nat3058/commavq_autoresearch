@@ -112,10 +112,10 @@ def run_experiment():
     # 2. Run data preparation
     print("\nRunning remote data preparation...")
     execute_remote_code("!python3 prepare.py")
-    
     # 3. Run training
     print("\nRunning remote training...")
-    output = execute_remote_code("!python3 train.py")
+    output = execute_remote_code("!torchrun --nproc_per_node=2 train.py")
+
     
     # 4. Parse results
     val_loss = None
@@ -156,18 +156,44 @@ def run_experiment():
         with open(BEST_SCORE_FILE, 'w') as f:
             json.dump({"val_loss": val_loss, "val_bpt": val_bpt, "comp_ratio": comp_ratio}, f)
             
-    # 6. Git ratchet action
+    # 6. Log results to TSV and Git ratchet action
+    results_tsv = os.path.join(os.path.dirname(__file__), "results.tsv")
+    if not os.path.exists(results_tsv):
+        with open(results_tsv, 'w', encoding='utf-8') as f:
+            f.write("commit\tval_loss\tval_bpt\tcomp_ratio\tstatus\tdescription\n")
+
+    # Get description from CLI argument
+    description = sys.argv[1] if len(sys.argv) > 1 else "baseline"
+
     train_path = "commavq_autoresearch/train.py"
     if improved:
         print(f"\n[NEW BEST] Improved validation loss to {val_loss:.6f}!")
         subprocess.run(["git", "add", train_path], check=True)
-        commit_msg = f"Improvement: val_loss = {val_loss:.6f}, comp_ratio = {comp_ratio:.2f}x"
-        subprocess.run(["git", "commit", "-m", commit_msg], check=True)
-        print("Committed changes to Git.")
+        # Check if there are actual changes staged
+        diff_res = subprocess.run(["git", "diff", "--cached", "--quiet"])
+        if diff_res.returncode != 0:
+            commit_msg = f"Improvement: val_loss = {val_loss:.6f}, {description}"
+            subprocess.run(["git", "commit", "-m", commit_msg], check=True)
+            print("Committed changes to Git.")
+        else:
+            print("No changes in train.py to commit (baseline run).")
+        
+        # Get commit hash
+        try:
+            commit_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode().strip()
+        except:
+            commit_hash = "unknown"
+            
+        with open(results_tsv, 'a', encoding='utf-8') as f:
+            f.write(f"{commit_hash}\t{val_loss:.6f}\t{val_bpt:.6f}\t{comp_ratio:.6f}\tkeep\t{description}\n")
     else:
         print(f"\n[NO IMPROVEMENT] val_loss = {val_loss:.6f} (best is {best_loss:.6f}). Reverting train.py...")
         subprocess.run(["git", "checkout", "--", train_path], check=True)
         print("Reverted train.py to last commit.")
+        
+        with open(results_tsv, 'a', encoding='utf-8') as f:
+            f.write(f"discard\t{val_loss:.6f}\t{val_bpt:.6f}\t{comp_ratio:.6f}\tdiscard\t{description}\n")
+
 
 if __name__ == "__main__":
     run_experiment()
