@@ -17,9 +17,10 @@ N_LAYER = 6
 N_HEAD = 8
 N_EMBD = 256
 TOKEN_EMBD_DIM = 64
-BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
-LEARNING_RATE = 8e-4     # Slightly adjusted for larger batch size
+BATCH_SIZE = 128          # Batch size per GPU (effective batch size = 256)
+LEARNING_RATE = 1.2e-3    # Scaled up for larger batch size
 WEIGHT_DECAY = 0.01
+
 
 # ---------------------------------------------------------------------------
 # GPT Model Components
