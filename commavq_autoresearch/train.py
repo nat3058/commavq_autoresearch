@@ -123,8 +123,8 @@ class CausalSelfAttention(nn.Module):
 class SwiGLUMLP(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
-        hidden_dim = int(2 * (4 * n_embd) / 3)
-        hidden_dim = ((hidden_dim + 7) // 8) * 8
+        hidden_dim = 2 * n_embd
+
         self.w1 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w2 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, n_embd, bias=False)
