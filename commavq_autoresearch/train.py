@@ -203,7 +203,17 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
+        # Linear learning rate warmup for first 200 steps
+        warm_steps = 200
+        if step < warm_steps:
+            curr_lr = LEARNING_RATE * (step / warm_steps)
+        else:
+            curr_lr = LEARNING_RATE
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = curr_lr
+            
         optimizer.zero_grad()
+
         
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
