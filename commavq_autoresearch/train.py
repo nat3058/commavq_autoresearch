@@ -122,6 +122,15 @@ class GPT(nn.Module):
         logits = self.lm_head(x, wte_weight)
         return logits
 
+def get_lr_multiplier(elapsed, total_time):
+    warmup_frac = 0.05
+    if elapsed < total_time * warmup_frac:
+        return elapsed / (total_time * warmup_frac)
+    else:
+        progress = (elapsed - total_time * warmup_frac) / (total_time * (1 - warmup_frac))
+        progress = min(1.0, max(0.0, progress))
+        return 0.1 + 0.9 * (0.5 * (1.0 + math.cos(math.pi * progress)))
+
 # ---------------------------------------------------------------------------
 # Training Execution
 # ---------------------------------------------------------------------------
@@ -169,6 +178,12 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
+        # Update learning rate based on time
+        elapsed = time.time() - t_start
+        lrm = get_lr_multiplier(elapsed, TIME_BUDGET)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = LEARNING_RATE * lrm
+            
         optimizer.zero_grad()
         
         # FP16 mixed precision forward pass
@@ -179,10 +194,10 @@ def train():
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-
         
         step += 1
         elapsed = time.time() - t_start
+
         
         if master_process and step % 50 == 0:
             print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s")
