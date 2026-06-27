@@ -9,7 +9,7 @@ from datasets import load_dataset
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-MAX_SEQ_LEN = 64          # Context length in frames (e.g. 64 frames)
+MAX_SEQ_LEN = 32          # Context length in frames (e.g. 32 frames)
 TIME_BUDGET = 300         # 5 minutes training time budget
 EVAL_BATCHES = 50         # Validation batches
 VOCAB_SIZE = 1024         # 1024 VQ tokens (0-1023), no special tokens needed
@@ -69,7 +69,8 @@ class Dataloader:
         ix = torch.randint(0, self.num_frames - self.sequence_len - 1, (self.batch_size,))
         x = torch.stack([torch.from_numpy(self.frames[i:i+self.sequence_len].astype(np.int64)) for i in ix])
         y = torch.stack([torch.from_numpy(self.frames[i+1:i+1+self.sequence_len].astype(np.int64)) for i in ix])
-        return x.cuda(), y.cuda()
+        return x.cuda(non_blocking=True), y.cuda(non_blocking=True)
+
 
 # ---------------------------------------------------------------------------
 # Evaluation

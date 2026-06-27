@@ -147,7 +147,7 @@ def train():
     
     # Initialize model
     model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).to(device)
-    model = torch.compile(model)
+    model = torch.compile(model, mode="reduce-overhead")
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
     
@@ -155,8 +155,9 @@ def train():
     train_loader = Dataloader(TRAIN_BIN, BATCH_SIZE, MAX_SEQ_LEN)
     val_loader = Dataloader(VAL_BIN, BATCH_SIZE, MAX_SEQ_LEN)
     
-    # Optimizer
+    # Optimizer and FP16 GradScaler
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, fused=True)
+    scaler = torch.cuda.amp.GradScaler()
     
     if master_process:
         print(f"Starting training (DDP: {ddp}, Time Budget: {TIME_BUDGET}s)...")
@@ -168,12 +169,17 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
-        logits = model(x)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-        
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        
+        # FP16 mixed precision forward pass
+        with torch.cuda.amp.autocast(dtype=torch.float16):
+            logits = model(x)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
         
         step += 1
         elapsed = time.time() - t_start
