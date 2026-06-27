@@ -9,12 +9,11 @@ from datasets import load_dataset
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-MAX_SEQ_LEN = 1032        # Context length (8 frames of 129 tokens)
-TIME_BUDGET = 300         # 5 minutes wall-clock training time
-EVAL_BATCHES = 50         # Number of validation batches to evaluate
-VOCAB_SIZE = 1026         # 1024 VQ tokens + 1 BOS (1024) + 1 EOT (1025)
-BOS_TOKEN = 1024
-EOT_TOKEN = 1025
+MAX_SEQ_LEN = 32          # Context length in frames (e.g. 32 frames)
+TIME_BUDGET = 300         # 5 minutes training time budget
+EVAL_BATCHES = 50         # Validation batches
+VOCAB_SIZE = 1024         # 1024 VQ tokens (0-1023), no special tokens needed
+FRAME_DIM = 128           # 128 VQ tokens per frame
 
 CACHE_DIR = "/kaggle/tmp/data_cache"
 TRAIN_BIN = os.path.join(CACHE_DIR, "train.bin")
@@ -39,18 +38,14 @@ def prepare_data():
     print("Processing training split...")
     train_tokens = []
     for x in train_ds:
-        tok = np.array(x['token.npy'], dtype=np.int16).reshape(-1, 128)
-        bos = np.ones((len(tok), 1), dtype=np.int16) * BOS_TOKEN
-        tok = np.hstack([bos, tok]).reshape(-1)
+        tok = np.array(x['token.npy'], dtype=np.int16).reshape(-1)
         train_tokens.append(tok)
     train_arr = np.concatenate(train_tokens)
     
     print("Processing validation split...")
     val_tokens = []
     for x in val_ds:
-        tok = np.array(x['token.npy'], dtype=np.int16).reshape(-1, 128)
-        bos = np.ones((len(tok), 1), dtype=np.int16) * BOS_TOKEN
-        tok = np.hstack([bos, tok]).reshape(-1)
+        tok = np.array(x['token.npy'], dtype=np.int16).reshape(-1)
         val_tokens.append(tok)
     val_arr = np.concatenate(val_tokens)
     
@@ -65,14 +60,15 @@ def prepare_data():
 class Dataloader:
     def __init__(self, filename, batch_size, sequence_len):
         self.data = np.memmap(filename, dtype=np.int16, mode='r')
+        self.frames = self.data.reshape(-1, FRAME_DIM)
         self.batch_size = batch_size
         self.sequence_len = sequence_len
-        self.num_tokens = len(self.data)
+        self.num_frames = len(self.frames)
         
     def get_batch(self):
-        ix = torch.randint(0, self.num_tokens - self.sequence_len - 1, (self.batch_size,))
-        x = torch.stack([torch.from_numpy(self.data[i:i+self.sequence_len].astype(np.int64)) for i in ix])
-        y = torch.stack([torch.from_numpy(self.data[i+1:i+1+self.sequence_len].astype(np.int64)) for i in ix])
+        ix = torch.randint(0, self.num_frames - self.sequence_len - 1, (self.batch_size,))
+        x = torch.stack([torch.from_numpy(self.frames[i:i+self.sequence_len].astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy(self.frames[i+1:i+1+self.sequence_len].astype(np.int64)) for i in ix])
         return x.cuda(), y.cuda()
 
 # ---------------------------------------------------------------------------
@@ -85,7 +81,8 @@ def evaluate_loss(model, val_loader):
     for _ in range(EVAL_BATCHES):
         x, y = val_loader.get_batch()
         logits = model(x)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        # logits shape: (Batch, L, 128, 1024), y shape: (Batch, L, 128)
+        loss = F.cross_entropy(logits.view(-1, VOCAB_SIZE), y.view(-1))
         losses.append(loss.item())
     model.train()
     val_loss = np.mean(losses)

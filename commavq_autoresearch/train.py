@@ -6,21 +6,48 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from prepare import MAX_SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, TRAIN_BIN, VAL_BIN, Dataloader, evaluate_loss
+from prepare import MAX_SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, FRAME_DIM, TRAIN_BIN, VAL_BIN, Dataloader, evaluate_loss
 
 # ---------------------------------------------------------------------------
 # Hyperparameters (agent modifies these)
 # ---------------------------------------------------------------------------
 N_LAYER = 4
-N_HEAD = 8
-N_EMBD = 256
-BATCH_SIZE = 32
+N_HEAD = 6
+N_EMBD = 192
+TOKEN_EMBD_DIM = 32
+BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 0.01
 
 # ---------------------------------------------------------------------------
 # GPT Model Components
 # ---------------------------------------------------------------------------
+class FrameEmbedding(nn.Module):
+    def __init__(self, vocab_size, token_embd_dim, n_embd, frame_dim=FRAME_DIM):
+        super().__init__()
+        self.wte = nn.Embedding(vocab_size, token_embd_dim)
+        self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
+        
+    def forward(self, x):
+        B, L, F = x.size()
+        emb = self.wte(x) # (B, L, 128, token_embd_dim)
+        emb = emb.view(B, L, F * emb.size(-1)) # (B, L, 128 * token_embd_dim)
+        return self.proj(emb) # (B, L, n_embd)
+
+class FrameHead(nn.Module):
+    def __init__(self, n_embd, token_embd_dim, frame_dim=FRAME_DIM):
+        super().__init__()
+        self.proj = nn.Linear(n_embd, frame_dim * token_embd_dim, bias=False)
+        self.frame_dim = frame_dim
+        self.token_embd_dim = token_embd_dim
+        
+    def forward(self, x, wte_weight):
+        B, L, C = x.size()
+        features = self.proj(x) # (B, L, 128 * token_embd_dim)
+        features = features.view(B, L, self.frame_dim, self.token_embd_dim)
+        logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
+        return logits
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, n_embd, n_head, block_size):
         super().__init__()
@@ -58,27 +85,30 @@ class Block(nn.Module):
         return x
 
 class GPT(nn.Module):
-    def __init__(self, vocab_size, n_embd, n_head, n_layer, block_size):
+    def __init__(self, vocab_size, token_embd_dim, n_embd, n_head, n_layer, block_size):
         super().__init__()
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(vocab_size, n_embd),
+            wfe = FrameEmbedding(vocab_size, token_embd_dim, n_embd),
             wpe = nn.Embedding(block_size, n_embd),
             h = nn.ModuleList([Block(n_embd, n_head, block_size) for _ in range(n_layer)]),
             ln_f = nn.LayerNorm(n_embd)
         ))
-        self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
+        self.lm_head = FrameHead(n_embd, token_embd_dim)
         self.block_size = block_size
-        self.transformer.wte.weight = self.lm_head.weight
         
     def forward(self, idx):
         device = idx.device
         t = idx.size(1)
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)
-        x = self.transformer.wte(idx) + self.transformer.wpe(pos)
+        
+        x = self.transformer.wfe(idx) + self.transformer.wpe(pos)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
+        
+        # Classifier with tied weights
+        wte_weight = self.transformer.wfe.wte.weight
+        logits = self.lm_head(x, wte_weight)
         return logits
 
 # ---------------------------------------------------------------------------
@@ -90,7 +120,7 @@ def train():
     torch.set_float32_matmul_precision("high")
     
     # Initialize model
-    model = GPT(VOCAB_SIZE, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).cuda()
+    model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).cuda()
     model = torch.compile(model)
     
     # Setup data loaders
@@ -119,7 +149,7 @@ def train():
         step += 1
         elapsed = time.time() - t_start
         
-        if step % 20 == 0:
+        if step % 50 == 0:
             print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s")
             
         if elapsed >= TIME_BUDGET:
