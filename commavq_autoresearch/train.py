@@ -120,14 +120,14 @@ class Block(nn.Module):
         super().__init__()
         self.ln_1 = nn.LayerNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, block_size)
-        self.ln_2 = nn.LayerNorm(n_embd)
         self.mlp = SwiGLUMLP(n_embd)
         self.scale = 1.0 / math.sqrt(2.0 * n_layer)
         
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x)) * self.scale
-        x = x + self.mlp(self.ln_2(x)) * self.scale
+        normed = self.ln_1(x)
+        x = x + (self.attn(normed) + self.mlp(normed)) * self.scale
         return x
+
 
 
 class GPT(nn.Module):
