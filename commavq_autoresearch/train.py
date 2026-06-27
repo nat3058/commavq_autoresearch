@@ -17,10 +17,9 @@ N_LAYER = 6
 N_HEAD = 8
 N_EMBD = 256
 TOKEN_EMBD_DIM = 64
-BATCH_SIZE = 128          # Batch size per GPU (effective batch size = 256)
-LEARNING_RATE = 1.2e-3    # Scaled up for larger batch size
+BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
+LEARNING_RATE = 8e-4     # Slightly adjusted for larger batch size
 WEIGHT_DECAY = 0.01
-
 
 # ---------------------------------------------------------------------------
 # GPT Model Components
@@ -82,22 +81,12 @@ class SwiGLUMLP(nn.Module):
     def forward(self, x):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-        
-    def forward(self, x):
-        variance = x.pow(2).mean(-1, keepdim=True)
-        return x * torch.rsqrt(variance + self.eps) * self.weight
-
 class Block(nn.Module):
     def __init__(self, n_embd, n_head, block_size):
         super().__init__()
-        self.ln_1 = RMSNorm(n_embd)
+        self.ln_1 = nn.LayerNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, block_size)
-        self.ln_2 = RMSNorm(n_embd)
+        self.ln_2 = nn.LayerNorm(n_embd)
         self.mlp = SwiGLUMLP(n_embd)
         
     def forward(self, x):
@@ -113,9 +102,8 @@ class GPT(nn.Module):
             wfe = FrameEmbedding(vocab_size, token_embd_dim, n_embd),
             wpe = nn.Embedding(block_size, n_embd),
             h = nn.ModuleList([Block(n_embd, n_head, block_size) for _ in range(n_layer)]),
-            ln_f = RMSNorm(n_embd)
+            ln_f = nn.LayerNorm(n_embd)
         ))
-
         self.lm_head = FrameHead(n_embd, token_embd_dim)
         self.block_size = block_size
         
@@ -133,15 +121,6 @@ class GPT(nn.Module):
         wte_weight = self.transformer.wfe.wte.weight
         logits = self.lm_head(x, wte_weight)
         return logits
-
-def get_lr_multiplier(elapsed, total_time):
-    warmup_frac = 0.05
-    if elapsed < total_time * warmup_frac:
-        return elapsed / (total_time * warmup_frac)
-    else:
-        progress = (elapsed - total_time * warmup_frac) / (total_time * (1 - warmup_frac))
-        progress = min(1.0, max(0.0, progress))
-        return 0.1 + 0.9 * (0.5 * (1.0 + math.cos(math.pi * progress)))
 
 # ---------------------------------------------------------------------------
 # Training Execution
@@ -178,7 +157,7 @@ def train():
     
     # Optimizer and FP16 GradScaler
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, fused=True)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
     
     if master_process:
         print(f"Starting training (DDP: {ddp}, Time Budget: {TIME_BUDGET}s)...")
@@ -190,26 +169,21 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
-        # Update learning rate based on time
-        elapsed = time.time() - t_start
-        lrm = get_lr_multiplier(elapsed, TIME_BUDGET)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = LEARNING_RATE * lrm
-            
         optimizer.zero_grad()
         
         # FP16 mixed precision forward pass
-        with torch.cuda.amp.autocast(dtype=torch.float16):
+        with torch.amp.autocast('cuda', dtype=torch.float16):
             logits = model(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+
+
         
         step += 1
         elapsed = time.time() - t_start
-
         
         if master_process and step % 50 == 0:
             print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s")
