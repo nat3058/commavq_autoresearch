@@ -216,7 +216,20 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
+        # Time-based cosine learning rate decay (const for 200s, decay to 8e-5 for last 100s)
+        elapsed = time.time() - t_start
+        if elapsed > 200.0:
+            decay_ratio = (elapsed - 200.0) / (TIME_BUDGET - 200.0)
+            decay_ratio = min(1.0, max(0.0, decay_ratio))
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+            curr_lr = 8e-5 + (LEARNING_RATE - 8e-5) * coeff
+        else:
+            curr_lr = LEARNING_RATE
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = curr_lr
+            
         optimizer.zero_grad()
+
         
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
