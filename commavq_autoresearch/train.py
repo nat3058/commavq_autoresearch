@@ -69,22 +69,31 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
 
+class SwiGLUMLP(nn.Module):
+    def __init__(self, n_embd):
+        super().__init__()
+        hidden_dim = int(2 * (4 * n_embd) / 3)
+        hidden_dim = ((hidden_dim + 7) // 8) * 8
+        self.w1 = nn.Linear(n_embd, hidden_dim, bias=False)
+        self.w2 = nn.Linear(n_embd, hidden_dim, bias=False)
+        self.w3 = nn.Linear(hidden_dim, n_embd, bias=False)
+        
+    def forward(self, x):
+        return self.w3(F.silu(self.w1(x)) * self.w2(x))
+
 class Block(nn.Module):
     def __init__(self, n_embd, n_head, block_size):
         super().__init__()
         self.ln_1 = nn.LayerNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, block_size)
         self.ln_2 = nn.LayerNorm(n_embd)
-        self.mlp = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd, bias=False),
-            nn.GELU(),
-            nn.Linear(4 * n_embd, n_embd, bias=False)
-        )
+        self.mlp = SwiGLUMLP(n_embd)
         
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
+
 
 class GPT(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, n_head, n_layer, block_size):
