@@ -28,29 +28,24 @@ WEIGHT_DECAY = 0.01
 # ---------------------------------------------------------------------------
 class FrameEmbedding(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, frame_dim=FRAME_DIM):
-
         super().__init__()
         self.wte = nn.Embedding(vocab_size, token_embd_dim)
-        self.conv = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
-        self.gn = nn.GroupNorm(8, token_embd_dim)
         self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
         
     def forward(self, x):
-        B, L, frame_dim = x.size()
+        B, L, F = x.size()
         emb = self.wte(x) # (B, L, 128, token_embd_dim)
-        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
-        emb = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
-        emb = F.silu(self.gn(self.conv(emb)))
-        # Reshape back to flat sequence
-        emb = emb.permute(0, 2, 3, 1).contiguous().view(B, L, -1)
+        emb = emb.view(B, L, F * emb.size(-1)) # (B, L, 128 * token_embd_dim)
         return self.proj(emb) # (B, L, n_embd)
 
 class FrameHead(nn.Module):
     def __init__(self, n_embd, token_embd_dim, frame_dim=FRAME_DIM):
         super().__init__()
         self.proj = nn.Linear(n_embd, frame_dim * token_embd_dim, bias=False)
-        self.conv = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
-        self.gn = nn.GroupNorm(8, token_embd_dim)
+        self.conv1 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn1 = nn.GroupNorm(8, token_embd_dim)
+        self.conv2 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn2 = nn.GroupNorm(8, token_embd_dim)
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
         
@@ -59,7 +54,11 @@ class FrameHead(nn.Module):
         features = self.proj(x) # (B, L, 128 * token_embd_dim)
         # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
         features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
-        features = F.silu(self.gn(self.conv(features)))
+        
+        # Spatial coordination refinement
+        features = features + F.silu(self.gn1(self.conv1(features)))
+        features = features + F.silu(self.gn2(self.conv2(features)))
+        
         # Reshape back to flat tokens
         features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
         logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
@@ -216,20 +215,7 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
-        # Time-based cosine learning rate decay (const for 200s, decay to 8e-5 for last 100s)
-        elapsed = time.time() - t_start
-        if elapsed > 200.0:
-            decay_ratio = (elapsed - 200.0) / (TIME_BUDGET - 200.0)
-            decay_ratio = min(1.0, max(0.0, decay_ratio))
-            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-            curr_lr = 8e-5 + (LEARNING_RATE - 8e-5) * coeff
-        else:
-            curr_lr = LEARNING_RATE
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = curr_lr
-            
         optimizer.zero_grad()
-
         
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
