@@ -20,8 +20,7 @@ N_EMBD = 448
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
 LEARNING_RATE = 8e-4     # Restored to optimal learning rate
-WEIGHT_DECAY = 0.1
-
+WEIGHT_DECAY = 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -29,46 +28,43 @@ WEIGHT_DECAY = 0.1
 # ---------------------------------------------------------------------------
 class FrameEmbedding(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, frame_dim=FRAME_DIM):
+
         super().__init__()
         self.wte = nn.Embedding(vocab_size, token_embd_dim)
-        
-        self.conv1 = nn.Conv2d(token_embd_dim, 128, kernel_size=3, padding=1, bias=False)
-        self.gn1 = nn.GroupNorm(8, 128)
-        self.conv2 = nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False)
-        self.gn2 = nn.GroupNorm(16, 256)
-        self.conv3 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1, bias=False)
-        self.gn3 = nn.GroupNorm(16, 256)
-        
-        self.proj = nn.Linear(256 * 2 * 4, n_embd, bias=False)
+        self.conv = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn = nn.GroupNorm(8, token_embd_dim)
+        self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
         
     def forward(self, x):
         B, L, frame_dim = x.size()
         emb = self.wte(x) # (B, L, 128, token_embd_dim)
-        # Reshape to (B * L, token_embd_dim, 8, 16) since VQ grid is 8x16
+        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
         emb = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
-        
-        x_c = F.silu(self.gn1(self.conv1(emb)))
-        x_c = F.silu(self.gn2(self.conv2(x_c)))
-        x_c = F.silu(self.gn3(self.conv3(x_c)))
-        
-        # Flatten spatial dimensions to (B, L, 256 * 2 * 4)
-        x_flat = x_c.contiguous().view(B, L, -1)
-        return self.proj(x_flat)
-
+        emb = F.silu(self.gn(self.conv(emb)))
+        # Reshape back to flat sequence
+        emb = emb.permute(0, 2, 3, 1).contiguous().view(B, L, -1)
+        return self.proj(emb) # (B, L, n_embd)
 
 class FrameHead(nn.Module):
     def __init__(self, n_embd, token_embd_dim, frame_dim=FRAME_DIM):
         super().__init__()
         self.proj = nn.Linear(n_embd, frame_dim * token_embd_dim, bias=False)
+        self.conv = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn = nn.GroupNorm(8, token_embd_dim)
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
         
     def forward(self, x, wte_weight):
         B, L, C = x.size()
         features = self.proj(x) # (B, L, 128 * token_embd_dim)
-        features = features.view(B, L, self.frame_dim, self.token_embd_dim)
+        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
+        features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
+        features = F.silu(self.gn(self.conv(features)))
+        # Reshape back to flat tokens
+        features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
         logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
         return logits
+
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000):
@@ -123,8 +119,8 @@ class CausalSelfAttention(nn.Module):
 class SwiGLUMLP(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
-        hidden_dim = 2 * n_embd
-
+        hidden_dim = int(2 * (4 * n_embd) / 3)
+        hidden_dim = ((hidden_dim + 7) // 8) * 8
         self.w1 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w2 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, n_embd, bias=False)
@@ -137,14 +133,14 @@ class Block(nn.Module):
         super().__init__()
         self.ln_1 = nn.LayerNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, block_size)
+        self.ln_2 = nn.LayerNorm(n_embd)
         self.mlp = SwiGLUMLP(n_embd)
         self.scale = 1.0 / math.sqrt(2.0 * n_layer)
         
     def forward(self, x):
-        normed = self.ln_1(x)
-        x = x + (self.attn(normed) + self.mlp(normed)) * self.scale
+        x = x + self.attn(self.ln_1(x)) * self.scale
+        x = x + self.mlp(self.ln_2(x)) * self.scale
         return x
-
 
 
 class GPT(nn.Module):
@@ -220,17 +216,7 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
-        # Linear learning rate warmup for first 200 steps
-        warm_steps = 200
-        if step < warm_steps:
-            curr_lr = LEARNING_RATE * (step / warm_steps)
-        else:
-            curr_lr = LEARNING_RATE
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = curr_lr
-            
         optimizer.zero_grad()
-
         
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
