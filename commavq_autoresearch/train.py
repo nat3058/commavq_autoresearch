@@ -78,27 +78,40 @@ class RotaryEmbedding(nn.Module):
         return q_embed, k_embed
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, n_embd, n_head, block_size):
+    def __init__(self, n_embd, n_head, block_size, n_kv_heads=2):
         super().__init__()
-        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=False)
-        self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
         self.n_head = n_head
+        self.n_kv_heads = n_kv_heads
         self.n_embd = n_embd
-        self.rotary_emb = RotaryEmbedding(n_embd // n_head)
+        self.head_dim = n_embd // n_head
+        
+        self.q_proj = nn.Linear(n_embd, n_head * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(n_embd, n_kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(n_embd, n_kv_heads * self.head_dim, bias=False)
+        self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
+        
+        self.rotary_emb = RotaryEmbedding(self.head_dim)
         
     def forward(self, x):
         B, T, C = x.size()
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        
+        q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         
         # Apply RoPE
         q, k = self.rotary_emb(q, k, T)
         
+        # Repeat KV for GQA
+        num_queries_per_kv = self.n_head // self.n_kv_heads
+        if num_queries_per_kv > 1:
+            k = k.repeat_interleave(num_queries_per_kv, dim=1)
+            v = v.repeat_interleave(num_queries_per_kv, dim=1)
+            
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
+
 
 class SwiGLUMLP(nn.Module):
     def __init__(self, n_embd):
