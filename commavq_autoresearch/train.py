@@ -46,6 +46,8 @@ class FrameHead(nn.Module):
         self.gn1 = nn.GroupNorm(8, token_embd_dim)
         self.conv2 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn2 = nn.GroupNorm(8, token_embd_dim)
+        self.conv3 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn3 = nn.GroupNorm(8, token_embd_dim)
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
         
@@ -55,14 +57,16 @@ class FrameHead(nn.Module):
         # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
         features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
         
-        # Spatial coordination refinement
+        # Spatial coordination refinement (3 residual layers)
         features = features + F.silu(self.gn1(self.conv1(features)))
         features = features + F.silu(self.gn2(self.conv2(features)))
+        features = features + F.silu(self.gn3(self.conv3(features)))
         
         # Reshape back to flat tokens
         features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
         logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
         return logits
+
 
 
 class RotaryEmbedding(nn.Module):
