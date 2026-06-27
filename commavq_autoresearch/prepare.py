@@ -1,0 +1,97 @@
+import os
+import time
+import math
+import numpy as np
+import torch
+import torch.nn.functional as F
+from datasets import load_dataset
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+MAX_SEQ_LEN = 1032        # Context length (8 frames of 129 tokens)
+TIME_BUDGET = 300         # 5 minutes wall-clock training time
+EVAL_BATCHES = 50         # Number of validation batches to evaluate
+VOCAB_SIZE = 1026         # 1024 VQ tokens + 1 BOS (1024) + 1 EOT (1025)
+BOS_TOKEN = 1024
+EOT_TOKEN = 1025
+
+CACHE_DIR = "/kaggle/tmp/data_cache"
+TRAIN_BIN = os.path.join(CACHE_DIR, "train.bin")
+VAL_BIN = os.path.join(CACHE_DIR, "val.bin")
+
+# ---------------------------------------------------------------------------
+# Data preparation
+# ---------------------------------------------------------------------------
+def prepare_data():
+    if os.path.exists(TRAIN_BIN) and os.path.exists(VAL_BIN):
+        print(f"Data already prepared at {CACHE_DIR}")
+        return
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    print("Downloading dataset from Hugging Face...")
+    
+    # Load first split for training
+    train_ds = load_dataset('commaai/commavq', data_files={'train': ['data-0000.tar.gz']})['train']
+    # Load second split for validation, take a subset of 100 segments
+    val_ds = load_dataset('commaai/commavq', data_files={'train': ['data-0001.tar.gz']})['train'].select(range(100))
+    
+    print("Processing training split...")
+    train_tokens = []
+    for x in train_ds:
+        tok = np.array(x['token.npy'], dtype=np.int16).reshape(-1, 128)
+        bos = np.ones((len(tok), 1), dtype=np.int16) * BOS_TOKEN
+        tok = np.hstack([bos, tok]).reshape(-1)
+        train_tokens.append(tok)
+    train_arr = np.concatenate(train_tokens)
+    
+    print("Processing validation split...")
+    val_tokens = []
+    for x in val_ds:
+        tok = np.array(x['token.npy'], dtype=np.int16).reshape(-1, 128)
+        bos = np.ones((len(tok), 1), dtype=np.int16) * BOS_TOKEN
+        tok = np.hstack([bos, tok]).reshape(-1)
+        val_tokens.append(tok)
+    val_arr = np.concatenate(val_tokens)
+    
+    # Save to binary files
+    train_arr.tofile(TRAIN_BIN)
+    val_arr.tofile(VAL_BIN)
+    print(f"Saved prepared binary files to {CACHE_DIR}")
+
+# ---------------------------------------------------------------------------
+# Dataloader
+# ---------------------------------------------------------------------------
+class Dataloader:
+    def __init__(self, filename, batch_size, sequence_len):
+        self.data = np.memmap(filename, dtype=np.int16, mode='r')
+        self.batch_size = batch_size
+        self.sequence_len = sequence_len
+        self.num_tokens = len(self.data)
+        
+    def get_batch(self):
+        ix = torch.randint(0, self.num_tokens - self.sequence_len - 1, (self.batch_size,))
+        x = torch.stack([torch.from_numpy(self.data[i:i+self.sequence_len].astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy(self.data[i+1:i+1+self.sequence_len].astype(np.int64)) for i in ix])
+        return x.cuda(), y.cuda()
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def evaluate_loss(model, val_loader):
+    model.eval()
+    losses = []
+    for _ in range(EVAL_BATCHES):
+        x, y = val_loader.get_batch()
+        logits = model(x)
+        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        losses.append(loss.item())
+    model.train()
+    val_loss = np.mean(losses)
+    val_bpt = val_loss / math.log(2)
+    comp_ratio = 10.0 / val_bpt
+    return val_loss, val_bpt, comp_ratio
+
+if __name__ == "__main__":
+    prepare_data()

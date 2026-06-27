@@ -1,0 +1,8 @@
+commavq/
+autoresearch/
+data_cache/
+__pycache__/
+*.tmp
+*.bin
+*.zip
+*.log
