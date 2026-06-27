@@ -31,13 +31,30 @@ class FrameEmbedding(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, frame_dim=FRAME_DIM):
         super().__init__()
         self.wte = nn.Embedding(vocab_size, token_embd_dim)
-        self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
+        
+        self.conv1 = nn.Conv2d(token_embd_dim, 128, kernel_size=3, padding=1, bias=False)
+        self.gn1 = nn.GroupNorm(8, 128)
+        self.conv2 = nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False)
+        self.gn2 = nn.GroupNorm(16, 256)
+        self.conv3 = nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1, bias=False)
+        self.gn3 = nn.GroupNorm(16, 256)
+        
+        self.proj = nn.Linear(256 * 2 * 4, n_embd, bias=False)
         
     def forward(self, x):
-        B, L, F = x.size()
+        B, L, frame_dim = x.size()
         emb = self.wte(x) # (B, L, 128, token_embd_dim)
-        emb = emb.view(B, L, F * emb.size(-1)) # (B, L, 128 * token_embd_dim)
-        return self.proj(emb) # (B, L, n_embd)
+        # Reshape to (B * L, token_embd_dim, 8, 16) since VQ grid is 8x16
+        emb = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
+        
+        x_c = F.silu(self.gn1(self.conv1(emb)))
+        x_c = F.silu(self.gn2(self.conv2(x_c)))
+        x_c = F.silu(self.gn3(self.conv3(x_c)))
+        
+        # Flatten spatial dimensions to (B, L, 256 * 2 * 4)
+        x_flat = x_c.contiguous().view(B, L, -1)
+        return self.proj(x_flat)
+
 
 class FrameHead(nn.Module):
     def __init__(self, n_embd, token_embd_dim, frame_dim=FRAME_DIM):
