@@ -14,12 +14,12 @@ from prepare import MAX_SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, FRAME_DIM, TRAIN_BIN, 
 # Hyperparameters (agent modifies these)
 # ---------------------------------------------------------------------------
 N_LAYER = 6
-N_HEAD = 4
-N_EMBD = 256
+N_HEAD = 6
+N_EMBD = 384
 
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
-LEARNING_RATE = 6e-4     # Slightly adjusted for larger batch size
+LEARNING_RATE = 8e-4     # Restored to optimal learning rate
 WEIGHT_DECAY = 0.01
 
 
@@ -134,17 +134,19 @@ class GPT(nn.Module):
         super().__init__()
         self.transformer = nn.ModuleDict(dict(
             wfe = FrameEmbedding(vocab_size, token_embd_dim, n_embd),
-            h = nn.ModuleList([Block(n_embd, n_head, block_size, n_layer) for _ in range(n_layer)]),
             ln_f = nn.LayerNorm(n_embd)
         ))
+        self.block_a = Block(n_embd, n_head, block_size, n_layer)
+        self.block_b = Block(n_embd, n_head, block_size, n_layer)
         self.lm_head = FrameHead(n_embd, token_embd_dim)
         self.block_size = block_size
-
+        self.n_layer = n_layer
         
     def forward(self, idx):
         x = self.transformer.wfe(idx)
-        for block in self.transformer.h:
-            x = block(x)
+        for _ in range(self.n_layer // 2):
+            x = self.block_a(x)
+            x = self.block_b(x)
         x = self.transformer.ln_f(x)
         
         # Tied weights classifier
