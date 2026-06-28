@@ -201,9 +201,17 @@ def train():
     torch.cuda.manual_seed(42 + ddp_rank)
     torch.set_float32_matmul_precision("high")
     
+    # Enable cuDNN autotuning for faster convolutions
+    torch.backends.cudnn.benchmark = True
+    
     # Initialize model
     model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).to(device)
-    model = torch.compile(model, mode="reduce-overhead")
+    
+    # Skip compilation for short proxy runs to avoid cold start latency
+    use_compile = TIME_BUDGET > 300
+    if use_compile:
+        model = torch.compile(model, mode="reduce-overhead")
+        
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
     
@@ -215,12 +223,35 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95), fused=True)
     scaler = torch.amp.GradScaler('cuda')
 
-    
-    # Synchronize max steps at startup to prevent rank mismatch
-    max_steps = torch.tensor([int(TIME_BUDGET * 7.0)], dtype=torch.int32, device=device)
+    # Dynamically measure and sync step budget
+    if not use_compile:
+        if master_process:
+            print("Calibrating training throughput dynamically...")
+        model.train()
+        t_cal_start = time.time()
+        for _ in range(10):
+            cx, cy = train_loader.get_batch()
+            optimizer.zero_grad()
+            with torch.amp.autocast('cuda', dtype=torch.float16):
+                clogits = model(cx)
+                closs = F.cross_entropy(clogits.view(-1, clogits.size(-1)), cy.view(-1))
+            scaler.scale(closs).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        torch.cuda.synchronize()
+        steps_per_sec = 10.0 / (time.time() - t_cal_start)
+        if master_process:
+            print(f"Dynamic calibration: {steps_per_sec:.2f} steps/sec")
+        step = 10
+    else:
+        steps_per_sec = 7.0
+        step = 0
+
+    steps_per_sec_tensor = torch.tensor([steps_per_sec], dtype=torch.float32, device=device)
     if ddp:
-        dist.broadcast(max_steps, src=0)
-    max_steps = max_steps.item()
+        dist.broadcast(steps_per_sec_tensor, src=0)
+    steps_per_sec = steps_per_sec_tensor.item()
+    max_steps = int(TIME_BUDGET * steps_per_sec)
 
     # Cosine learning rate scheduler
     def get_lr(step_idx):
@@ -237,7 +268,6 @@ def train():
     if master_process:
         print(f"Starting training (DDP: {ddp}, Max Steps: {max_steps})...")
     t_start = time.time()
-    step = 0
     
     model.train()
     while step < max_steps:

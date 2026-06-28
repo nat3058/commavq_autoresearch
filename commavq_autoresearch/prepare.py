@@ -66,11 +66,16 @@ class Dataloader:
         self.sequence_len = sequence_len
         self.num_frames = len(self.frames)
         
+        # Precompute offset tensor on GPU once
+        self.offsets = torch.arange(sequence_len, device='cuda')
+        
     def get_batch(self):
         # Generate random start indices directly on GPU
         ix = torch.randint(0, self.num_frames - self.sequence_len - 1, (self.batch_size,), device='cuda')
-        x = torch.stack([self.frames[i : i + self.sequence_len] for i in ix])
-        y = torch.stack([self.frames[i + 1 : i + 1 + self.sequence_len] for i in ix])
+        # Vectorized gather using broadcasting (no Python loops)
+        indices = ix.unsqueeze(1) + self.offsets.unsqueeze(0)
+        x = self.frames[indices]
+        y = self.frames[indices + 1]
         return x, y
 
 
@@ -83,9 +88,10 @@ def evaluate_loss(model, val_loader):
     losses = []
     for _ in range(EVAL_BATCHES):
         x, y = val_loader.get_batch()
-        logits = model(x)
-        # logits shape: (Batch, L, 128, 1024), y shape: (Batch, L, 128)
-        loss = F.cross_entropy(logits.view(-1, VOCAB_SIZE), y.view(-1))
+        with torch.amp.autocast('cuda', dtype=torch.float16):
+            logits = model(x)
+            # logits shape: (Batch, L, 128, 1024), y shape: (Batch, L, 128)
+            loss = F.cross_entropy(logits.view(-1, VOCAB_SIZE), y.view(-1))
         losses.append(loss.item())
     model.train()
     val_loss = np.mean(losses)
