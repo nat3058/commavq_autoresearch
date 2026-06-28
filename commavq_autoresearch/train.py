@@ -13,9 +13,10 @@ from prepare import MAX_SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, FRAME_DIM, TRAIN_BIN, 
 # ---------------------------------------------------------------------------
 # Hyperparameters (agent modifies these)
 # ---------------------------------------------------------------------------
-N_LAYER = 12
+N_LAYER = 8
 N_HEAD = 7
 N_EMBD = 448
+
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
 LEARNING_RATE = 8e-4     # Restored to optimal learning rate
@@ -105,38 +106,27 @@ class RotaryEmbedding(nn.Module):
 class CausalSelfAttention(nn.Module):
     def __init__(self, n_embd, n_head, block_size):
         super().__init__()
-        assert n_embd % n_head == 0
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=False)
+        self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
         self.n_head = n_head
         self.n_embd = n_embd
-        self.head_dim = n_embd // n_head
-        
-        # Multi-Query Attention projections
-        self.q_proj = nn.Linear(n_embd, n_embd, bias=False)
-        self.kv_proj = nn.Linear(n_embd, 2 * self.head_dim, bias=False)
-        self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
-        self.rotary_emb = RotaryEmbedding(self.head_dim)
+        self.rotary_emb = RotaryEmbedding(n_embd // n_head)
         
     def forward(self, x):
         B, T, C = x.size()
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         
-        q = self.q_proj(x) # (B, T, C)
-        kv = self.kv_proj(x) # (B, T, 2 * head_dim)
-        k, v = kv.split(self.head_dim, dim=-1)
-        
-        # Reshape for multi-head query attention and single-head key/value
-        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, 1, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, 1, self.head_dim).transpose(1, 2)
-        
-        # Apply RoPE (broadcasting over heads works naturally)
+        # Apply RoPE
         q, k = self.rotary_emb(q, k, T)
         
-        # PyTorch SDPA handles key-value head broadcasting automatically
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
 
-class SwiGLUMLP(nn.Module):
+class SpatiallyGatedMLP(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
         hidden_dim = int(2 * (4 * n_embd) / 3)
@@ -145,8 +135,27 @@ class SwiGLUMLP(nn.Module):
         self.w2 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, n_embd, bias=False)
         
+        # Spatial coordinate mixing on gating branch via depthwise 2D conv
+        self.spatial_conv = nn.Conv2d(
+            hidden_dim, hidden_dim, kernel_size=3, padding=1, 
+            groups=hidden_dim, bias=False
+        )
+        self.gn = nn.GroupNorm(8, hidden_dim)
+        self.hidden_dim = hidden_dim
+        
     def forward(self, x):
-        return self.w3(F.silu(self.w1(x)) * self.w2(x))
+        B, L, C = x.size()
+        gate = self.w1(x) # (B, L, H)
+        val = self.w2(x)  # (B, L, H)
+        
+        # Reshape gate to 2D spatial grid (B * L, H, 8, 16)
+        gate_grid = gate.view(B * L, 8, 16, self.hidden_dim).permute(0, 3, 1, 2)
+        gate_grid = gate_grid + F.silu(self.gn(self.spatial_conv(gate_grid)))
+        gate = gate_grid.permute(0, 2, 3, 1).contiguous().view(B, L, self.hidden_dim)
+        
+        # Gated activation
+        out = F.silu(gate) * val
+        return self.w3(out)
 
 class Block(nn.Module):
     def __init__(self, n_embd, n_head, block_size, n_layer=6):
@@ -154,7 +163,7 @@ class Block(nn.Module):
         self.ln_1 = nn.LayerNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, block_size)
         self.ln_2 = nn.LayerNorm(n_embd)
-        self.mlp = SwiGLUMLP(n_embd)
+        self.mlp = SpatiallyGatedMLP(n_embd)
         self.scale = 1.0 / math.sqrt(2.0 * n_layer)
         
     def forward(self, x):
@@ -225,19 +234,14 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95), fused=True)
     scaler = torch.amp.GradScaler('cuda')
 
-    # Synchronize max steps at startup to prevent rank mismatch
-    max_steps = torch.tensor([int(TIME_BUDGET * 7.0)], dtype=torch.int32, device=device)
-    if ddp:
-        dist.broadcast(max_steps, src=0)
-    max_steps = max_steps.item()
-
+    
     if master_process:
-        print(f"Starting training (DDP: {ddp}, Max Steps: {max_steps})...")
+        print(f"Starting training (DDP: {ddp}, Time Budget: {TIME_BUDGET}s)...")
     t_start = time.time()
     step = 0
     
     model.train()
-    while step < max_steps:
+    while True:
         t0 = time.time()
         x, y = train_loader.get_batch()
         
@@ -252,31 +256,31 @@ def train():
         scaler.step(optimizer)
         scaler.update()
 
+
+        
         step += 1
         elapsed = time.time() - t_start
         
         if master_process and step % 50 == 0:
             print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s")
             
-    if ddp:
-        dist.barrier()
-        dist.destroy_process_group()
-
+        if elapsed >= TIME_BUDGET:
+            break
+            
     if master_process:
         print("Training finished. Evaluating...")
-        # Unwrap model for evaluation if using DDP and compile
+        # Unwrap model for evaluation if using DDP
         raw_model = model.module if ddp else model
-        eager_model = raw_model._orig_mod if hasattr(raw_model, '_orig_mod') else raw_model
-        val_loss, val_bpt, comp_ratio = evaluate_loss(eager_model, val_loader)
+        val_loss, val_bpt, comp_ratio = evaluate_loss(raw_model, val_loader)
         
         print("\n--- RESULTS ---")
         print(f"val_loss: {val_loss:.6f}")
         print(f"val_bpt: {val_bpt:.6f}")
         print(f"comp_ratio: {comp_ratio:.6f}")
-        print(f"num_params: {sum(p.numel() for p in eager_model.parameters()):,}")
-        
-        # Save model weights
-        torch.save(eager_model.state_dict(), "model.pt")
+        print(f"num_params: {sum(p.numel() for p in raw_model.parameters()):,}")
+
+    if ddp:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     train()
