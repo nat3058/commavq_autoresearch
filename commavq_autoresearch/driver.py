@@ -6,7 +6,7 @@ import websocket
 import requests
 import subprocess
 
-JUPYTER_URL = "https://kkb-production.jupyter-proxy.kaggle.net/k/330869538/eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2IiwidHlwIjoiSldUIn0..h62FeGKkH6ctjdglygaZgQ.nEB6LxmCwJMyP2KbxkQsbIhGBBGWEy6F1nLAKPtKu0-eRq9JTIfaSJ7sFeG85oI3jYN3_znHCs2P0XFDuWSz843DguheQ1yUaSXxK_1cewlrim525u2-FmDHRf9_SkqBbyX_bomo3pRgLjyLx_7bFcTUxKBd9MnuRgn2ediQBxdSDZexkYy4zc45AuxH5199HS2MTbaFJe1hi-6KHTWcHcumr4Qpb4A1YOE3BCG6lnOVP3JFpXVR3FB-MUYRcB5p.vlx258nkhlUmo6FmrRxXoA/proxy"
+JUPYTER_URL = "https://kkb-production.jupyter-proxy.kaggle.net/k/331131220/eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2IiwidHlwIjoiSldUIn0..Yq5GCmuHmIafluaaywnEVw.2g6Pa2BgTG00hngOkIcJjfJ_tQQbBvmuvU0mavP4DICiwz1MumfWD-8riVn5AB_oqbwZykBGo5XKaCLVLTC3aLjgwMNX5G59e7guGeNmXsC0Ma78GgO9bmsqUTJ6FrhyBHen5NANSaTAFzgneb3tf_ee5p0b0xWRcr8HE2jnA8hcDOx56DIqbWE3pWZuhLCIjjmQ0nnoBCjjXoIgpSEY462FJw4x3CRmLvkzo-qOxcQ.zHLrnRZD2HcJSqFf3YtyPw/proxy"
 BEST_SCORE_FILE = os.path.join(os.path.dirname(__file__), "best_score.json")
 
 def get_active_kernel_id():
@@ -114,7 +114,7 @@ def run_experiment():
     execute_remote_code("!python3 prepare.py")
     # 3. Run training
     print("\nRunning remote training...")
-    output = execute_remote_code("!torchrun --nproc_per_node=2 train.py")
+    output = execute_remote_code("!export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True && torchrun --nproc_per_node=2 train.py")
 
     
     # 4. Parse results

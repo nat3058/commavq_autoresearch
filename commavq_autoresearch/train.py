@@ -18,8 +18,8 @@ N_HEAD = 7
 N_EMBD = 448
 
 TOKEN_EMBD_DIM = 64
-BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
-LEARNING_RATE = 1e-3     # Restored to optimal learning rate
+BATCH_SIZE = 128         # Batch size per GPU (effective batch size = 256)
+LEARNING_RATE = 1.2e-3   # Scaled for 2x larger batch size
 WEIGHT_DECAY = 0.01
 
 
@@ -227,7 +227,7 @@ def train():
     model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).to(device)
     
     # Skip compilation for short proxy runs to avoid cold start latency
-    use_compile = TIME_BUDGET > 300
+    use_compile = TIME_BUDGET > 600
     if use_compile:
         model = torch.compile(model, mode="reduce-overhead")
         
@@ -241,6 +241,8 @@ def train():
     # Optimizer and FP16 GradScaler
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95), fused=True)
     scaler = torch.amp.GradScaler('cuda')
+
+    t_start = time.time()
 
     # Dynamically measure and sync step budget
     if not use_compile:
@@ -258,11 +260,13 @@ def train():
             scaler.step(optimizer)
             scaler.update()
         torch.cuda.synchronize()
-        steps_per_sec = 10.0 / (time.time() - t_cal_start)
+        calibration_elapsed = time.time() - t_cal_start
+        steps_per_sec = 10.0 / calibration_elapsed
         if master_process:
-            print(f"Dynamic calibration: {steps_per_sec:.2f} steps/sec")
+            print(f"Dynamic calibration: {steps_per_sec:.2f} steps/sec (calibration took {calibration_elapsed:.2f}s)")
         step = 10
     else:
+        calibration_elapsed = 0.0
         steps_per_sec = 7.0
         step = 0
 
@@ -270,7 +274,7 @@ def train():
     if ddp:
         dist.broadcast(steps_per_sec_tensor, src=0)
     steps_per_sec = steps_per_sec_tensor.item()
-    max_steps = int(TIME_BUDGET * steps_per_sec)
+    max_steps = int((TIME_BUDGET - calibration_elapsed) * steps_per_sec) + step
 
     # Cosine learning rate scheduler
     def get_lr(step_idx):
@@ -286,7 +290,6 @@ def train():
 
     if master_process:
         print(f"Starting training (DDP: {ddp}, Max Steps: {max_steps})...")
-    t_start = time.time()
     
     model.train()
     while step < max_steps:
@@ -313,7 +316,7 @@ def train():
         elapsed = time.time() - t_start
         
         if master_process and step % 50 == 0:
-            print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s | LR: {lr:.2e}")
+            print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s | LR: {lr:.2e} | Scale: {scaler.get_scale()}")
             
     if ddp:
         dist.barrier()
