@@ -30,13 +30,20 @@ class FrameEmbedding(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, frame_dim=FRAME_DIM):
         super().__init__()
         self.wte = nn.Embedding(vocab_size, token_embd_dim)
+        self.conv = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn = nn.GroupNorm(8, token_embd_dim)
         self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
         
     def forward(self, x):
-        B, L, F = x.size()
+        B, L, frame_dim = x.size()
         emb = self.wte(x) # (B, L, 128, token_embd_dim)
-        emb = emb.view(B, L, F * emb.size(-1)) # (B, L, 128 * token_embd_dim)
+        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
+        emb_grid = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
+        emb_grid = emb_grid + F.silu(self.gn(self.conv(emb_grid)))
+        # Reshape back to flat sequence
+        emb = emb_grid.permute(0, 2, 3, 1).contiguous().view(B, L, -1)
         return self.proj(emb) # (B, L, n_embd)
+
 
 class FrameHead(nn.Module):
     def __init__(self, n_embd, token_embd_dim, frame_dim=FRAME_DIM):
