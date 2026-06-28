@@ -34,12 +34,22 @@ class FrameEmbedding(nn.Module):
         self.gn = nn.GroupNorm(8, token_embd_dim)
         self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
         
+        # Learnable 2D spatial coordinate embeddings for 8x16 grid
+        self.coord_emb = nn.Parameter(torch.zeros(1, 1, 8, 16, token_embd_dim))
+        nn.init.normal_(self.coord_emb, std=0.02)
+        
     def forward(self, x):
         B, L, frame_dim = x.size()
         emb = self.wte(x) # (B, L, 128, token_embd_dim)
+        
+        # Reshape to grid and add spatial coordinates
+        emb = emb.view(B, L, 8, 16, -1)
+        emb = emb + self.coord_emb
+        
         # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
-        emb_grid = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
+        emb_grid = emb.permute(0, 1, 4, 2, 3).reshape(B * L, -1, 8, 16)
         emb_grid = emb_grid + F.silu(self.gn(self.conv(emb_grid)))
+        
         # Reshape back to flat sequence
         emb = emb_grid.permute(0, 2, 3, 1).contiguous().view(B, L, -1)
         return self.proj(emb) # (B, L, n_embd)
@@ -58,11 +68,20 @@ class FrameHead(nn.Module):
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
         
+        # Learnable 2D spatial coordinate embeddings for 8x16 grid
+        self.coord_emb = nn.Parameter(torch.zeros(1, 1, 8, 16, token_embd_dim))
+        nn.init.normal_(self.coord_emb, std=0.02)
+        
     def forward(self, x, wte_weight):
         B, L, C = x.size()
         features = self.proj(x) # (B, L, 128 * token_embd_dim)
-        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
-        features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
+        
+        # Reshape to grid and add spatial coordinates
+        features = features.view(B, L, 8, 16, self.token_embd_dim)
+        features = features + self.coord_emb
+        
+        # Permute to (B * L, token_embd_dim, 8, 16) for 2D convolutions
+        features = features.permute(0, 1, 4, 2, 3).reshape(B * L, self.token_embd_dim, 8, 16)
         
         # Spatial coordination refinement (3 residual layers)
         features = features + F.silu(self.gn1(self.conv1(features)))
