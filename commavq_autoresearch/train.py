@@ -340,10 +340,6 @@ def train():
         if master_process and step % 50 == 0:
             print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s | LR: {lr:.2e} | Scale: {scaler.get_scale()}")
             
-    if ddp:
-        dist.barrier()
-        dist.destroy_process_group()
-
     if master_process:
         print("Training finished. Evaluating...")
         # Unwrap model for evaluation if using DDP and compile
@@ -356,6 +352,13 @@ def train():
         print(f"val_bpt: {val_bpt:.6f}")
         print(f"comp_ratio: {comp_ratio:.6f}")
         print(f"num_params: {sum(p.numel() for p in eager_model.parameters()):,}")
+        
+        # Save model weights
+        torch.save(eager_model.state_dict(), "model.pt")
+
+    if ddp:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 
