@@ -14,11 +14,11 @@ from prepare import MAX_SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, FRAME_DIM, TRAIN_BIN, 
 # Hyperparameters (agent modifies these)
 # ---------------------------------------------------------------------------
 N_LAYER = 8
-N_HEAD = 4
-N_EMBD = 256
+N_HEAD = 7
+N_EMBD = 448
 
 TOKEN_EMBD_DIM = 64
-BATCH_SIZE = 32          # Batch size per GPU (effective batch size = 128)
+BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
 LEARNING_RATE = 8e-4     # Restored to optimal learning rate
 WEIGHT_DECAY = 0.01
 
@@ -30,31 +30,70 @@ class FrameEmbedding(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, frame_dim=FRAME_DIM):
         super().__init__()
         self.wte = nn.Embedding(vocab_size, token_embd_dim)
-        self.conv = nn.Conv2d(token_embd_dim, n_embd, kernel_size=3, padding=1, bias=False)
-        self.gn = nn.GroupNorm(8, n_embd)
+        self.conv = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn = nn.GroupNorm(8, token_embd_dim)
+        
+        # S-SPCP downsampler to 4x8
+        self.conv_pw = nn.Conv2d(token_embd_dim, 32, kernel_size=1, bias=False)
+        self.conv_dw = nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1, groups=32, bias=False)
+        self.gn_down = nn.GroupNorm(8, 32)
+        self.proj = nn.Linear(32 * 4 * 8, n_embd, bias=False)
         
     def forward(self, x):
         B, L, frame_dim = x.size()
         emb = self.wte(x) # (B, L, 128, token_embd_dim)
         emb_grid = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
-        emb_grid = F.silu(self.gn(self.conv(emb_grid))) # (B * L, n_embd, 8, 16)
-        return emb_grid.view(B, L, emb_grid.size(1), 8, 16) # (B, L, n_embd, 8, 16)
+        
+        # Spatial boundary convolution
+        emb_grid = emb_grid + F.silu(self.gn(self.conv(emb_grid)))
+        
+        # Downsample to 4x8
+        x_down = F.silu(self.gn_down(self.conv_dw(self.conv_pw(emb_grid))))
+        
+        # Flatten and project to n_embd
+        x_flat = x_down.contiguous().view(B, L, -1)
+        return self.proj(x_flat) # (B, L, n_embd)
 
 class FrameHead(nn.Module):
     def __init__(self, n_embd, token_embd_dim, frame_dim=FRAME_DIM):
         super().__init__()
-        self.conv = nn.Conv2d(n_embd, token_embd_dim, kernel_size=3, padding=1, bias=False)
-        self.gn = nn.GroupNorm(8, token_embd_dim)
+        # S-SPCP upsampler from 4x8
+        self.proj = nn.Linear(n_embd, 32 * 4 * 8, bias=False)
+        self.conv_pw = nn.Conv2d(32, token_embd_dim, kernel_size=1, bias=False)
+        self.gn_up = nn.GroupNorm(8, token_embd_dim)
+        
+        # Spatial boundary convolutions
+        self.conv1 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn1 = nn.GroupNorm(8, token_embd_dim)
+        self.conv2 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn2 = nn.GroupNorm(8, token_embd_dim)
+        self.conv3 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn3 = nn.GroupNorm(8, token_embd_dim)
+        
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
         
     def forward(self, x, wte_weight):
-        B, L, C, H, W = x.size()
-        x_grid = x.view(B * L, C, H, W)
-        features = F.silu(self.gn(self.conv(x_grid))) # (B * L, token_embd_dim, 8, 16)
+        B, L, C = x.size()
+        features = self.proj(x) # (B, L, 1024)
+        features = features.view(B * L, 32, 4, 8)
+        
+        # Bilinear upsample to 8x16
+        features = F.interpolate(features, size=(8, 16), mode='bilinear', align_corners=False)
+        features = F.silu(self.gn_up(self.conv_pw(features)))
+        
+        # Spatial coordination refinement (3 residual layers)
+        features = features + F.silu(self.gn1(self.conv1(features)))
+        features = features + F.silu(self.gn2(self.conv2(features)))
+        features = features + F.silu(self.gn3(self.conv3(features)))
+        
+        # Reshape back to flat tokens
         features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
         logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
         return logits
+
+
+
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000):
@@ -78,92 +117,67 @@ class RotaryEmbedding(nn.Module):
         device = q.device
         cos = self.cos_cached[:seq_len, :].unsqueeze(0).unsqueeze(1).to(device)
         sin = self.sin_cached[:seq_len, :].unsqueeze(0).unsqueeze(1).to(device)
-        return (q * cos) + (self._rotate_half(q) * sin), (k * cos) + (self._rotate_half(k) * sin)
+        
+        q_embed = (q * cos) + (self._rotate_half(q) * sin)
+        k_embed = (k * cos) + (self._rotate_half(k) * sin)
+        return q_embed, k_embed
 
 class CausalSelfAttention(nn.Module):
     def __init__(self, n_embd, n_head, block_size):
         super().__init__()
-        self.q_conv = nn.Conv2d(n_embd, n_embd, kernel_size=1, bias=False)
-        self.k_conv = nn.Conv2d(n_embd, n_embd, kernel_size=1, bias=False)
-        self.v_conv = nn.Conv2d(n_embd, n_embd, kernel_size=1, bias=False)
-        self.o_conv = nn.Conv2d(n_embd, n_embd, kernel_size=1, bias=False)
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=False)
+        self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
         self.n_head = n_head
         self.n_embd = n_embd
         self.rotary_emb = RotaryEmbedding(n_embd // n_head)
         
     def forward(self, x):
-        B, T, C, H, W = x.size()
-        x_flat = x.view(B * T, C, H, W)
-        q = self.q_conv(x_flat).view(B, T, C, H, W)
-        k = self.k_conv(x_flat).view(B, T, C, H, W)
-        v = self.v_conv(x_flat).view(B, T, C, H, W)
+        B, T, C = x.size()
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         
-        q_pool = q.mean(dim=[-2, -1]) # (B, T, C)
-        k_pool = k.mean(dim=[-2, -1]) # (B, T, C)
+        # Apply RoPE
+        q, k = self.rotary_emb(q, k, T)
         
-        q_pool = q_pool.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        k_pool = k_pool.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        
-        q_pool, k_pool = self.rotary_emb(q_pool, k_pool, T)
-        
-        v_flat = v.view(B, T, self.n_head, C // self.n_head, H * W)
-        v_flat = v_flat.permute(0, 2, 1, 3, 4).contiguous().view(B, self.n_head, T, -1)
-        
-        # Manual causal attention to avoid FlashAttention shape-mismatch OOM during compilation
-        attn = torch.matmul(q_pool, k_pool.transpose(-2, -1)) * (1.0 / math.sqrt(q_pool.size(-1))) # (B, n_head, T, T)
-        mask = torch.triu(torch.full((T, T), float('-inf'), device=x.device), diagonal=1)
-        attn = attn + mask.unsqueeze(0).unsqueeze(1)
-        attn = F.softmax(attn, dim=-1)
-        y = torch.matmul(attn, v_flat) # (B, n_head, T, head_dim * H * W)
-
-        
-        y = y.view(B, self.n_head, T, C // self.n_head, H, W)
-        y = y.permute(0, 2, 1, 3, 4, 5).contiguous().view(B, T, C, H, W)
-        
-        y_flat = y.view(B * T, C, H, W)
-        return self.o_conv(y_flat).view(B, T, C, H, W)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        return self.c_proj(y)
 
 class SwiGLUMLP(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
         hidden_dim = int(2 * (4 * n_embd) / 3)
         hidden_dim = ((hidden_dim + 7) // 8) * 8
-        self.w1 = nn.Conv2d(n_embd, hidden_dim, kernel_size=1, bias=False)
-        self.w2 = nn.Conv2d(n_embd, hidden_dim, kernel_size=1, bias=False)
-        self.conv = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1, groups=hidden_dim, bias=False)
-        self.w3 = nn.Conv2d(hidden_dim, n_embd, kernel_size=1, bias=False)
+        self.w1 = nn.Linear(n_embd, hidden_dim, bias=False)
+        self.w2 = nn.Linear(n_embd, hidden_dim, bias=False)
+        self.w3 = nn.Linear(hidden_dim, n_embd, bias=False)
         
     def forward(self, x):
-        # Input x is (B * T, C, H, W)
-        x1 = self.w1(x)
-        x2 = self.w2(x)
-        x1 = self.conv(x1)
-        return self.w3(F.silu(x1) * x2)
+        return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 class Block(nn.Module):
-    def __init__(self, n_embd, n_head, block_size, n_layer=8):
+    def __init__(self, n_embd, n_head, block_size, n_layer=6):
         super().__init__()
-        self.gn_1 = nn.GroupNorm(1, n_embd)
+        self.ln_1 = nn.LayerNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, block_size)
-        self.gn_2 = nn.GroupNorm(1, n_embd)
+        self.ln_2 = nn.LayerNorm(n_embd)
         self.mlp = SwiGLUMLP(n_embd)
         self.scale = 1.0 / math.sqrt(2.0 * n_layer)
         
     def forward(self, x):
-        B, L, C, H, W = x.size()
-        x_norm1 = self.gn_1(x.view(B * L, C, H, W)).view(B, L, C, H, W)
-        x = x + self.attn(x_norm1) * self.scale
-        
-        x_norm2 = self.gn_2(x.view(B * L, C, H, W)) # (B * L, C, H, W)
-        x = x + self.mlp(x_norm2).view(B, L, C, H, W) * self.scale
+        x = x + self.attn(self.ln_1(x)) * self.scale
+        x = x + self.mlp(self.ln_2(x)) * self.scale
         return x
+
 
 class GPT(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, n_head, n_layer, block_size):
         super().__init__()
         self.transformer = nn.ModuleDict(dict(
             wfe = FrameEmbedding(vocab_size, token_embd_dim, n_embd),
-            ln_f = nn.GroupNorm(1, n_embd)
+            ln_f = nn.LayerNorm(n_embd)
         ))
         self.block = Block(n_embd, n_head, block_size, n_layer)
         self.lm_head = FrameHead(n_embd, token_embd_dim)
@@ -171,18 +185,15 @@ class GPT(nn.Module):
         self.n_layer = n_layer
         
     def forward(self, idx):
-        x = self.transformer.wfe(idx) # (B, L, C, H, W)
+        x = self.transformer.wfe(idx)
         for _ in range(self.n_layer):
             x = self.block(x)
-            
-        B, L, C, H, W = x.size()
-        x_norm = self.transformer.ln_f(x.view(B * L, C, H, W)).view(B, L, C, H, W)
+        x = self.transformer.ln_f(x)
         
+        # Tied weights classifier
         wte_weight = self.transformer.wfe.wte.weight
-        logits = self.lm_head(x_norm, wte_weight)
+        logits = self.lm_head(x, wte_weight)
         return logits
-
-
 
 
 
