@@ -10,7 +10,7 @@ from datasets import load_dataset
 # Constants
 # ---------------------------------------------------------------------------
 MAX_SEQ_LEN = 32          # Context length in frames (e.g. 32 frames)
-TIME_BUDGET = 1200         # 20 minutes training time budget
+TIME_BUDGET = 300         # 5 minutes training time budget
 EVAL_BATCHES = 50         # Validation batches
 VOCAB_SIZE = 1024         # 1024 VQ tokens (0-1023), no special tokens needed
 FRAME_DIM = 128           # 128 VQ tokens per frame
@@ -59,17 +59,19 @@ def prepare_data():
 # ---------------------------------------------------------------------------
 class Dataloader:
     def __init__(self, filename, batch_size, sequence_len):
-        self.data = np.memmap(filename, dtype=np.int16, mode='r')
-        self.frames = self.data.reshape(-1, FRAME_DIM)
+        # Load entire binary file to RAM and convert to int64 GPU tensor
+        raw_data = np.fromfile(filename, dtype=np.int16)
+        self.frames = torch.from_numpy(raw_data.reshape(-1, FRAME_DIM).astype(np.int64)).cuda()
         self.batch_size = batch_size
         self.sequence_len = sequence_len
         self.num_frames = len(self.frames)
         
     def get_batch(self):
-        ix = torch.randint(0, self.num_frames - self.sequence_len - 1, (self.batch_size,))
-        x = torch.stack([torch.from_numpy(self.frames[i:i+self.sequence_len].astype(np.int64)) for i in ix])
-        y = torch.stack([torch.from_numpy(self.frames[i+1:i+1+self.sequence_len].astype(np.int64)) for i in ix])
-        return x.cuda(non_blocking=True), y.cuda(non_blocking=True)
+        # Generate random start indices directly on GPU
+        ix = torch.randint(0, self.num_frames - self.sequence_len - 1, (self.batch_size,), device='cuda')
+        x = torch.stack([self.frames[i : i + self.sequence_len] for i in ix])
+        y = torch.stack([self.frames[i + 1 : i + 1 + self.sequence_len] for i in ix])
+        return x, y
 
 
 # ---------------------------------------------------------------------------
