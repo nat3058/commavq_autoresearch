@@ -26,6 +26,23 @@ WEIGHT_DECAY = 0.01
 # ---------------------------------------------------------------------------
 # GPT Model Components
 # ---------------------------------------------------------------------------
+def get_2d_sines(height, width, dim):
+    assert dim % 4 == 0, "Dimension must be divisible by 4"
+    pe = torch.zeros(height, width, dim)
+    d_model = dim // 2
+    div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+    
+    # y coordinates
+    pos_y = torch.arange(0, height).unsqueeze(1)
+    pe[:, :, 0:d_model:2] = torch.sin(pos_y * div_term).unsqueeze(1).repeat(1, width, 1)
+    pe[:, :, 1:d_model:2] = torch.cos(pos_y * div_term).unsqueeze(1).repeat(1, width, 1)
+    
+    # x coordinates
+    pos_x = torch.arange(0, width).unsqueeze(1)
+    pe[:, :, d_model::2] = torch.sin(pos_x * div_term).unsqueeze(0).repeat(height, 1, 1)
+    pe[:, :, d_model+1::2] = torch.cos(pos_x * div_term).unsqueeze(0).repeat(height, 1, 1)
+    return pe
+
 class FrameEmbedding(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, frame_dim=FRAME_DIM):
         super().__init__()
@@ -34,9 +51,9 @@ class FrameEmbedding(nn.Module):
         self.gn = nn.GroupNorm(8, token_embd_dim)
         self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
         
-        # Learnable 2D spatial coordinate embeddings for 8x16 grid
-        self.coord_emb = nn.Parameter(torch.zeros(1, 1, 8, 16, token_embd_dim))
-        nn.init.normal_(self.coord_emb, std=0.02)
+        # 2D sinusoidal spatial coordinate grid embeddings
+        sines = get_2d_sines(8, 16, token_embd_dim).unsqueeze(0).unsqueeze(0)
+        self.coord_emb = nn.Parameter(sines)
         
     def forward(self, x):
         B, L, frame_dim = x.size()
@@ -68,9 +85,9 @@ class FrameHead(nn.Module):
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
         
-        # Learnable 2D spatial coordinate embeddings for 8x16 grid
-        self.coord_emb = nn.Parameter(torch.zeros(1, 1, 8, 16, token_embd_dim))
-        nn.init.normal_(self.coord_emb, std=0.02)
+        # 2D sinusoidal spatial coordinate grid embeddings
+        sines = get_2d_sines(8, 16, token_embd_dim).unsqueeze(0).unsqueeze(0)
+        self.coord_emb = nn.Parameter(sines)
         
     def forward(self, x, wte_weight):
         B, L, C = x.size()
@@ -306,9 +323,14 @@ def train():
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
             logits = model(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1), label_smoothing=0.1)
             
         scaler.scale(loss).backward()
+        
+        # Gradient norm clipping
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         scaler.step(optimizer)
         scaler.update()
 
