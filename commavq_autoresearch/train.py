@@ -139,18 +139,28 @@ class SwiGLUMLP(nn.Module):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 class Block(nn.Module):
-    def __init__(self, n_embd, n_head, block_size, n_layer=6):
+    def __init__(self, n_embd, n_head, block_size, n_layer=8):
         super().__init__()
         self.ln_1 = nn.LayerNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, block_size)
+        self.conv_res = nn.Conv2d(n_embd, n_embd, kernel_size=3, padding=1, groups=n_embd, bias=False)
+        self.gn_res = nn.GroupNorm(8, n_embd)
         self.ln_2 = nn.LayerNorm(n_embd)
         self.mlp = SwiGLUMLP(n_embd)
         self.scale = 1.0 / math.sqrt(2.0 * n_layer)
         
     def forward(self, x):
+        B, L, C = x.size()
         x = x + self.attn(self.ln_1(x)) * self.scale
+        
+        # Spatial residual mixing (depthwise convolution over 8x16 grid)
+        x_grid = x.view(B * L, C, 8, 16)
+        x_conv = F.silu(self.gn_res(self.conv_res(x_grid))).view(B, L, C)
+        x = x + x_conv * self.scale
+        
         x = x + self.mlp(self.ln_2(x)) * self.scale
         return x
+
 
 
 class GPT(nn.Module):
