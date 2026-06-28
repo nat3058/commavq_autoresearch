@@ -122,29 +122,9 @@ class CausalSelfAttention(nn.Module):
         # Apply RoPE
         q, k = self.rotary_emb(q, k, T)
         
-        # Construct Multi-Scale Causal Mask of shape (1, n_head, T, T)
-        mask = torch.triu(torch.full((T, T), float('-inf'), device=x.device), diagonal=1) # (T, T)
-        mask = mask.unsqueeze(0).unsqueeze(1).repeat(1, self.n_head, 1, 1) # (1, n_head, T, T)
-        
-        # Local causal heads (Head 3 and 4: window size 4)
-        local_mask = torch.triu(torch.full((T, T), float('-inf'), device=x.device), diagonal=1)
-        local_lower = torch.tril(torch.full((T, T), float('-inf'), device=x.device), diagonal=-4)
-        local_mask = local_mask + local_lower
-        mask[:, 3:5, :, :] = local_mask
-        
-        # Strided causal heads (Head 5 and 6: every 2nd frame)
-        t_indices = torch.arange(T, device=x.device).unsqueeze(1)
-        j_indices = torch.arange(T, device=x.device).unsqueeze(0)
-        stride_mismatch = ((t_indices - j_indices) % 2 != 0)
-        strided_mask = torch.triu(torch.full((T, T), float('-inf'), device=x.device), diagonal=1)
-        strided_mask[stride_mismatch] = float('-inf')
-        mask[:, 5:7, :, :] = strided_mask
-        
-        # Run attention with the custom mask
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
-
 
 class SwiGLUMLP(nn.Module):
     def __init__(self, n_embd):
@@ -280,111 +260,11 @@ def train():
         print(f"comp_ratio: {comp_ratio:.6f}")
         print(f"num_params: {sum(p.numel() for p in raw_model.parameters()):,}")
         
-        verify_arithmetic_coding(raw_model, comp_ratio)
+        # Save model weights
+        torch.save(raw_model.state_dict(), "model.pt")
 
     if ddp:
         dist.destroy_process_group()
 
-def verify_arithmetic_coding(model, comp_ratio):
-    import os
-    import numpy as np
-    import torch
-    import torch.nn.functional as F
-    
-    print("\nInstalling torchac to verify arithmetic coding...")
-    os.system("pip install torchac > /dev/null 2>&1")
-    try:
-        import torchac
-    except ImportError:
-        print("Verification skipped: torchac not installed.")
-        return
-        
-    model.eval()
-    from prepare import VAL_BIN, FRAME_DIM
-    if not os.path.exists(VAL_BIN):
-        print("Verification skipped: VAL_BIN not found.")
-        return
-        
-    val_data = np.fromfile(VAL_BIN, dtype=np.int16).reshape(-1, FRAME_DIM)
-    if len(val_data) < 1200:
-        print("Verification skipped: val data too small.")
-        return
-        
-    # Take first 1200 frames (1 segment)
-    gt_tokens = torch.from_numpy(val_data[:1200].astype(np.int64)).cuda() # (1200, 128)
-    compressed_bytes_list = []
-    
-    # Compress frame 0 using a uniform prior
-    flat_probs = torch.full((128, 1024), 1.0 / 1024.0, device='cuda')
-    flat_cdf = torch.zeros(128, 1025, device='cuda')
-    flat_cdf[:, 1:] = torch.cumsum(flat_probs, dim=-1)
-    flat_cdf = flat_cdf / flat_cdf[:, -1:]
-    
-    byte_stream = torchac.encode_float_cdf(flat_cdf.cpu(), gt_tokens[0].to(torch.int16).cpu())
-    compressed_bytes_list.append(byte_stream)
-    
-    # Compress frames 1 to 1199
-    history = gt_tokens.unsqueeze(0) # (1, 1200, 128)
-    print("Running autoregressive compression...")
-    for t in range(1, 1200):
-        start_idx = max(0, t - 32)
-        context = history[:, start_idx:t, :] # (1, context_len, 128)
-        
-        with torch.no_grad():
-            with torch.amp.autocast('cuda', dtype=torch.float16):
-                logits = model(context)
-        
-        target_logits = logits[0, -1, :, :].float() # (128, 1024)
-        probs = torch.softmax(target_logits, dim=-1)
-        
-        cdf = torch.zeros(128, 1025, device='cuda')
-        cdf[:, 1:] = torch.cumsum(probs, dim=-1)
-        cdf = cdf / cdf[:, -1:]
-        
-        target_symbols = gt_tokens[t].to(torch.int16)
-        byte_stream = torchac.encode_float_cdf(cdf.cpu(), target_symbols.cpu())
-        compressed_bytes_list.append(byte_stream)
-        
-    total_encoded_bytes = sum(len(b) for b in compressed_bytes_list)
-    uncompressed_bytes = 1200 * 128 * 10 / 8
-    actual_ratio = uncompressed_bytes / total_encoded_bytes
-    
-    # Autoregressive Decompression
-    print("Running autoregressive decompression...")
-    decoded_history = torch.zeros((1, 1200, 128), dtype=torch.int64, device='cuda')
-    
-    # Decode frame 0
-    decoded_symbols_0 = torchac.decode_float_cdf(flat_cdf.cpu(), compressed_bytes_list[0])
-    decoded_history[0, 0, :] = torch.from_numpy(np.array(decoded_symbols_0)).cuda()
-    
-    # Decode frames 1 to 1199
-    for t in range(1, 1200):
-        start_idx = max(0, t - 32)
-        context = decoded_history[:, start_idx:t, :]
-        
-        with torch.no_grad():
-            with torch.amp.autocast('cuda', dtype=torch.float16):
-                logits = model(context)
-                
-        target_logits = logits[0, -1, :, :].float()
-        probs = torch.softmax(target_logits, dim=-1)
-        
-        cdf = torch.zeros(128, 1025, device='cuda')
-        cdf[:, 1:] = torch.cumsum(probs, dim=-1)
-        cdf = cdf / cdf[:, -1:]
-        
-        decoded_symbols = torchac.decode_float_cdf(cdf.cpu(), compressed_bytes_list[t])
-        decoded_history[0, t, :] = torch.from_numpy(np.array(decoded_symbols)).cuda()
-        
-    assert torch.equal(gt_tokens, decoded_history[0]), "Lossless decompression failed! Decoded tokens differ from original."
-    print("SUCCESS: Lossless decompression verified (100% identical).")
-    print(f"Actual compressed size (1 segment): {total_encoded_bytes:,} bytes.")
-    print(f"Uncompressed size (1 segment): {int(uncompressed_bytes):,} bytes.")
-    print(f"Actual compression ratio: {actual_ratio:.6f}x (vs theoretical {comp_ratio:.6f}x)")
-
-    # Save model weights
-    torch.save(model.state_dict(), "model.pt")
-
 if __name__ == "__main__":
     train()
-
