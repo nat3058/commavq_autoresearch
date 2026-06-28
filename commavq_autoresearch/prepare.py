@@ -10,7 +10,7 @@ from datasets import load_dataset
 # Constants
 # ---------------------------------------------------------------------------
 MAX_SEQ_LEN = 32          # Context length in frames (e.g. 32 frames)
-TIME_BUDGET = 1200         # 20 minutes training time budget
+TIME_BUDGET = 300         # 5 minutes training time budget
 EVAL_BATCHES = 50         # Validation batches
 VOCAB_SIZE = 1024         # 1024 VQ tokens (0-1023), no special tokens needed
 FRAME_DIM = 128           # 128 VQ tokens per frame
