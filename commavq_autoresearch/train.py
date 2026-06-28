@@ -13,10 +13,9 @@ from prepare import MAX_SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, FRAME_DIM, TRAIN_BIN, 
 # ---------------------------------------------------------------------------
 # Hyperparameters (agent modifies these)
 # ---------------------------------------------------------------------------
-N_LAYER = 8
-N_HEAD = 6
-N_EMBD = 384
-
+N_LAYER = 12
+N_HEAD = 10
+N_EMBD = 640
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
 LEARNING_RATE = 8e-4     # Restored to optimal learning rate
@@ -106,22 +105,33 @@ class RotaryEmbedding(nn.Module):
 class CausalSelfAttention(nn.Module):
     def __init__(self, n_embd, n_head, block_size):
         super().__init__()
-        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=False)
-        self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
+        assert n_embd % n_head == 0
         self.n_head = n_head
         self.n_embd = n_embd
-        self.rotary_emb = RotaryEmbedding(n_embd // n_head)
+        self.head_dim = n_embd // n_head
+        
+        # Multi-Query Attention projections
+        self.q_proj = nn.Linear(n_embd, n_embd, bias=False)
+        self.kv_proj = nn.Linear(n_embd, 2 * self.head_dim, bias=False)
+        self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
+        self.rotary_emb = RotaryEmbedding(self.head_dim)
         
     def forward(self, x):
         B, T, C = x.size()
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         
-        # Apply RoPE
+        q = self.q_proj(x) # (B, T, C)
+        kv = self.kv_proj(x) # (B, T, 2 * head_dim)
+        k, v = kv.split(self.head_dim, dim=-1)
+        
+        # Reshape for multi-head query attention and single-head key/value
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(B, T, 1, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, 1, self.head_dim).transpose(1, 2)
+        
+        # Apply RoPE (broadcasting over heads works naturally)
         q, k = self.rotary_emb(q, k, T)
         
+        # PyTorch SDPA handles key-value head broadcasting automatically
         y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
@@ -139,24 +149,16 @@ class SwiGLUMLP(nn.Module):
         return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 class Block(nn.Module):
-    def __init__(self, n_embd, n_head, block_size, n_layer=8):
+    def __init__(self, n_embd, n_head, block_size, n_layer=6):
         super().__init__()
         self.ln_1 = nn.LayerNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, block_size)
-        self.conv1d = nn.Conv1d(n_embd, n_embd, kernel_size=3, bias=False)
         self.ln_2 = nn.LayerNorm(n_embd)
         self.mlp = SwiGLUMLP(n_embd)
         self.scale = 1.0 / math.sqrt(2.0 * n_layer)
         
     def forward(self, x):
-        # 1D causal temporal convolution
-        x_conv = x.permute(0, 2, 1) # (B, C, L)
-        x_conv = F.pad(x_conv, (2, 0)) # pad left with 2 zeros for causality
-        x_conv = F.silu(self.conv1d(x_conv)) # (B, C, L)
-        x_conv = x_conv.permute(0, 2, 1) # (B, L, C)
-        
         x = x + self.attn(self.ln_1(x)) * self.scale
-        x = x + x_conv * self.scale
         x = x + self.mlp(self.ln_2(x)) * self.scale
         return x
 
@@ -253,34 +255,23 @@ def train():
         if master_process and step % 50 == 0:
             print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s")
             
-        # Synchronized exit check to prevent rank step mismatch
-        stop = torch.tensor([0.0], device=device)
-        if master_process and elapsed >= TIME_BUDGET:
-            stop[0] = 1.0
-        if ddp:
-            dist.broadcast(stop, src=0)
-        if stop[0] > 0.5:
+        if elapsed >= TIME_BUDGET:
             break
             
-    if ddp:
-        dist.barrier()
-        dist.destroy_process_group()
-
     if master_process:
         print("Training finished. Evaluating...")
-        # Unwrap model for evaluation if using DDP and compile
+        # Unwrap model for evaluation if using DDP
         raw_model = model.module if ddp else model
-        eager_model = raw_model._orig_mod if hasattr(raw_model, '_orig_mod') else raw_model
-        val_loss, val_bpt, comp_ratio = evaluate_loss(eager_model, val_loader)
+        val_loss, val_bpt, comp_ratio = evaluate_loss(raw_model, val_loader)
         
         print("\n--- RESULTS ---")
         print(f"val_loss: {val_loss:.6f}")
         print(f"val_bpt: {val_bpt:.6f}")
         print(f"comp_ratio: {comp_ratio:.6f}")
-        print(f"num_params: {sum(p.numel() for p in eager_model.parameters()):,}")
-        
-        # Save model weights
-        torch.save(eager_model.state_dict(), "model.pt")
+        print(f"num_params: {sum(p.numel() for p in raw_model.parameters()):,}")
+
+    if ddp:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     train()
