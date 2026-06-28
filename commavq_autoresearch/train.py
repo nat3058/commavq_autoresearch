@@ -287,11 +287,18 @@ def train():
         steps_per_sec = 7.0
         step = 0
 
-    steps_per_sec_tensor = torch.tensor([steps_per_sec], dtype=torch.float32, device=device)
+    # Calculate step budget on Rank 0
+    if master_process:
+        max_steps = int((TIME_BUDGET - calibration_elapsed) * steps_per_sec) + step
+    else:
+        max_steps = 0
+
+    # Broadcast max_steps and step to all ranks to guarantee identical iteration counts
+    sync_tensor = torch.tensor([max_steps, step], dtype=torch.int32, device=device)
     if ddp:
-        dist.broadcast(steps_per_sec_tensor, src=0)
-    steps_per_sec = steps_per_sec_tensor.item()
-    max_steps = int((TIME_BUDGET - calibration_elapsed) * steps_per_sec) + step
+        dist.broadcast(sync_tensor, src=0)
+    max_steps = sync_tensor[0].item()
+    step = sync_tensor[1].item()
 
     # Cosine learning rate scheduler
     def get_lr(step_idx):
