@@ -225,14 +225,19 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95), fused=True)
     scaler = torch.amp.GradScaler('cuda')
 
-    
+    # Synchronize max steps at startup to prevent rank mismatch
+    max_steps = torch.tensor([int(TIME_BUDGET * 7.0)], dtype=torch.int32, device=device)
+    if ddp:
+        dist.broadcast(max_steps, src=0)
+    max_steps = max_steps.item()
+
     if master_process:
-        print(f"Starting training (DDP: {ddp}, Time Budget: {TIME_BUDGET}s)...")
+        print(f"Starting training (DDP: {ddp}, Max Steps: {max_steps})...")
     t_start = time.time()
     step = 0
     
     model.train()
-    while True:
+    while step < max_steps:
         t0 = time.time()
         x, y = train_loader.get_batch()
         
@@ -247,31 +252,31 @@ def train():
         scaler.step(optimizer)
         scaler.update()
 
-
-        
         step += 1
         elapsed = time.time() - t_start
         
         if master_process and step % 50 == 0:
             print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s")
             
-        if elapsed >= TIME_BUDGET:
-            break
-            
+    if ddp:
+        dist.barrier()
+        dist.destroy_process_group()
+
     if master_process:
         print("Training finished. Evaluating...")
-        # Unwrap model for evaluation if using DDP
+        # Unwrap model for evaluation if using DDP and compile
         raw_model = model.module if ddp else model
-        val_loss, val_bpt, comp_ratio = evaluate_loss(raw_model, val_loader)
+        eager_model = raw_model._orig_mod if hasattr(raw_model, '_orig_mod') else raw_model
+        val_loss, val_bpt, comp_ratio = evaluate_loss(eager_model, val_loader)
         
         print("\n--- RESULTS ---")
         print(f"val_loss: {val_loss:.6f}")
         print(f"val_bpt: {val_bpt:.6f}")
         print(f"comp_ratio: {comp_ratio:.6f}")
-        print(f"num_params: {sum(p.numel() for p in raw_model.parameters()):,}")
-
-    if ddp:
-        dist.destroy_process_group()
+        print(f"num_params: {sum(p.numel() for p in eager_model.parameters()):,}")
+        
+        # Save model weights
+        torch.save(eager_model.state_dict(), "model.pt")
 
 if __name__ == "__main__":
     train()
