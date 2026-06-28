@@ -330,14 +330,9 @@ def train():
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
             logits = model(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1), label_smoothing=0.1)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             
         scaler.scale(loss).backward()
-        
-        # Gradient norm clipping
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
         scaler.step(optimizer)
         scaler.update()
 
