@@ -253,7 +253,13 @@ def train():
         if master_process and step % 50 == 0:
             print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s")
             
-        if elapsed >= TIME_BUDGET:
+        # Synchronized exit check to prevent rank step mismatch
+        stop = torch.tensor([0.0], device=device)
+        if master_process and elapsed >= TIME_BUDGET:
+            stop[0] = 1.0
+        if ddp:
+            dist.broadcast(stop, src=0)
+        if stop[0] > 0.5:
             break
             
     if ddp:
