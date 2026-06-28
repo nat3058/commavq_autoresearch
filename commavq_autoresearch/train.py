@@ -122,9 +122,29 @@ class CausalSelfAttention(nn.Module):
         # Apply RoPE
         q, k = self.rotary_emb(q, k, T)
         
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
+        # Construct Multi-Scale Causal Mask of shape (1, n_head, T, T)
+        mask = torch.triu(torch.full((T, T), float('-inf'), device=x.device), diagonal=1) # (T, T)
+        mask = mask.unsqueeze(0).unsqueeze(1).repeat(1, self.n_head, 1, 1) # (1, n_head, T, T)
+        
+        # Local causal heads (Head 3 and 4: window size 4)
+        local_mask = torch.triu(torch.full((T, T), float('-inf'), device=x.device), diagonal=1)
+        local_lower = torch.tril(torch.full((T, T), float('-inf'), device=x.device), diagonal=-4)
+        local_mask = local_mask + local_lower
+        mask[:, 3:5, :, :] = local_mask
+        
+        # Strided causal heads (Head 5 and 6: every 2nd frame)
+        t_indices = torch.arange(T, device=x.device).unsqueeze(1)
+        j_indices = torch.arange(T, device=x.device).unsqueeze(0)
+        stride_mismatch = ((t_indices - j_indices) % 2 != 0)
+        strided_mask = torch.triu(torch.full((T, T), float('-inf'), device=x.device), diagonal=1)
+        strided_mask[stride_mismatch] = float('-inf')
+        mask[:, 5:7, :, :] = strided_mask
+        
+        # Run attention with the custom mask
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
+
 
 class SwiGLUMLP(nn.Module):
     def __init__(self, n_embd):
