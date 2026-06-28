@@ -32,66 +32,47 @@ class FrameEmbedding(nn.Module):
         self.wte = nn.Embedding(vocab_size, token_embd_dim)
         self.conv = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn = nn.GroupNorm(8, token_embd_dim)
-        
-        # S-SPCP downsampler to 4x8
-        self.conv_pw = nn.Conv2d(token_embd_dim, 32, kernel_size=1, bias=False)
-        self.conv_dw = nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1, groups=32, bias=False)
-        self.gn_down = nn.GroupNorm(8, 32)
-        self.proj = nn.Linear(32 * 4 * 8, n_embd, bias=False)
+        self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
         
     def forward(self, x):
         B, L, frame_dim = x.size()
         emb = self.wte(x) # (B, L, 128, token_embd_dim)
+        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
         emb_grid = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
-        
-        # Spatial boundary convolution
-        emb_grid = emb_grid + F.silu(self.gn(self.conv(emb_grid)))
-        
-        # Downsample to 4x8
-        x_down = F.silu(self.gn_down(self.conv_dw(self.conv_pw(emb_grid))))
-        
-        # Flatten and project to n_embd
-        x_flat = x_down.contiguous().view(B, L, -1)
-        return self.proj(x_flat) # (B, L, n_embd)
+        emb_grid = emb_grid + F.gelu(self.gn(self.conv(emb_grid)))
+        # Reshape back to flat sequence
+        emb = emb_grid.permute(0, 2, 3, 1).contiguous().view(B, L, -1)
+        return self.proj(emb) # (B, L, n_embd)
+
 
 class FrameHead(nn.Module):
     def __init__(self, n_embd, token_embd_dim, frame_dim=FRAME_DIM):
         super().__init__()
-        # S-SPCP upsampler from 4x8
-        self.proj = nn.Linear(n_embd, 32 * 4 * 8, bias=False)
-        self.conv_pw = nn.Conv2d(32, token_embd_dim, kernel_size=1, bias=False)
-        self.gn_up = nn.GroupNorm(8, token_embd_dim)
-        
-        # Spatial boundary convolutions
+        self.proj = nn.Linear(n_embd, frame_dim * token_embd_dim, bias=False)
         self.conv1 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn1 = nn.GroupNorm(8, token_embd_dim)
         self.conv2 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn2 = nn.GroupNorm(8, token_embd_dim)
         self.conv3 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn3 = nn.GroupNorm(8, token_embd_dim)
-        
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
         
     def forward(self, x, wte_weight):
         B, L, C = x.size()
-        features = self.proj(x) # (B, L, 1024)
-        features = features.view(B * L, 32, 4, 8)
+        features = self.proj(x) # (B, L, 128 * token_embd_dim)
+        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
+        features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
         
-        # Bilinear upsample to 8x16
-        features = F.interpolate(features, size=(8, 16), mode='bilinear', align_corners=False)
-        features = F.silu(self.gn_up(self.conv_pw(features)))
-        
-        # Spatial coordination refinement (3 residual layers)
-        features = features + F.silu(self.gn1(self.conv1(features)))
-        features = features + F.silu(self.gn2(self.conv2(features)))
-        features = features + F.silu(self.gn3(self.conv3(features)))
+        # Spatial coordination refinement (3 residual layers with GELU)
+        features = features + F.gelu(self.gn1(self.conv1(features)))
+        features = features + F.gelu(self.gn2(self.conv2(features)))
+        features = features + F.gelu(self.gn3(self.conv3(features)))
         
         # Reshape back to flat tokens
         features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
         logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
         return logits
-
 
 
 
