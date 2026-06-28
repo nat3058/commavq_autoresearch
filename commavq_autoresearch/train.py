@@ -256,23 +256,25 @@ def train():
         if elapsed >= TIME_BUDGET:
             break
             
+    if ddp:
+        dist.barrier()
+        dist.destroy_process_group()
+
     if master_process:
         print("Training finished. Evaluating...")
-        # Unwrap model for evaluation if using DDP
+        # Unwrap model for evaluation if using DDP and compile
         raw_model = model.module if ddp else model
-        val_loss, val_bpt, comp_ratio = evaluate_loss(raw_model, val_loader)
+        eager_model = raw_model._orig_mod if hasattr(raw_model, '_orig_mod') else raw_model
+        val_loss, val_bpt, comp_ratio = evaluate_loss(eager_model, val_loader)
         
         print("\n--- RESULTS ---")
         print(f"val_loss: {val_loss:.6f}")
         print(f"val_bpt: {val_bpt:.6f}")
         print(f"comp_ratio: {comp_ratio:.6f}")
-        print(f"num_params: {sum(p.numel() for p in raw_model.parameters()):,}")
+        print(f"num_params: {sum(p.numel() for p in eager_model.parameters()):,}")
         
         # Save model weights
-        torch.save(raw_model.state_dict(), "model.pt")
-
-    if ddp:
-        dist.destroy_process_group()
+        torch.save(eager_model.state_dict(), "model.pt")
 
 if __name__ == "__main__":
     train()
