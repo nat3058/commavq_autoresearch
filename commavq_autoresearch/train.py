@@ -300,28 +300,11 @@ def train():
     max_steps = sync_tensor[0].item()
     step = sync_tensor[1].item()
 
-    # Cosine learning rate scheduler
-    def get_lr(step_idx):
-        warmup_steps = 100
-        min_lr = 8e-5
-        if step_idx < warmup_steps:
-            return LEARNING_RATE * (step_idx / warmup_steps)
-        if step_idx > max_steps:
-            return min_lr
-        decay_ratio = (step_idx - warmup_steps) / (max_steps - warmup_steps)
-        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-        return min_lr + coeff * (LEARNING_RATE - min_lr)
-
     if master_process:
         print(f"Starting training (DDP: {ddp}, Max Steps: {max_steps})...")
     
     model.train()
     while step < max_steps:
-        # Update learning rate dynamically
-        lr = get_lr(step)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-
         t0 = time.time()
         x, y = train_loader.get_batch()
         
@@ -340,7 +323,7 @@ def train():
         elapsed = time.time() - t_start
         
         if master_process and step % 50 == 0:
-            print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s | LR: {lr:.2e} | Scale: {scaler.get_scale()}")
+            print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s | LR: {LEARNING_RATE:.2e} | Scale: {scaler.get_scale()}")
             
     if master_process:
         print("Training finished. Evaluating...")
