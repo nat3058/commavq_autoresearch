@@ -281,10 +281,9 @@ def train():
         print(f"val_loss: {val_loss:.6f}")
         print(f"val_bpt: {val_bpt:.6f}")
         print(f"comp_ratio: {comp_ratio:.6f}")
-        print(f"num_params: {sum(p.numel() for p in raw_model.parameters()):,}")
+        print(f"num_params: {sum(p.numel() for p in eager_model.parameters()):,}")
 
-    if ddp:
-        dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     train()
