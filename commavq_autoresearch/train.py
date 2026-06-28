@@ -126,7 +126,7 @@ class CausalSelfAttention(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.c_proj(y)
 
-class SpatiallyGatedMLP(nn.Module):
+class SwiGLUMLP(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
         hidden_dim = int(2 * (4 * n_embd) / 3)
@@ -135,27 +135,8 @@ class SpatiallyGatedMLP(nn.Module):
         self.w2 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, n_embd, bias=False)
         
-        # Spatial coordinate mixing on gating branch via depthwise 2D conv
-        self.spatial_conv = nn.Conv2d(
-            hidden_dim, hidden_dim, kernel_size=3, padding=1, 
-            groups=hidden_dim, bias=False
-        )
-        self.gn = nn.GroupNorm(8, hidden_dim)
-        self.hidden_dim = hidden_dim
-        
     def forward(self, x):
-        B, L, C = x.size()
-        gate = self.w1(x) # (B, L, H)
-        val = self.w2(x)  # (B, L, H)
-        
-        # Reshape gate to 2D spatial grid (B * L, H, 8, 16)
-        gate_grid = gate.view(B * L, 8, 16, self.hidden_dim).permute(0, 3, 1, 2)
-        gate_grid = gate_grid + F.silu(self.gn(self.spatial_conv(gate_grid)))
-        gate = gate_grid.permute(0, 2, 3, 1).contiguous().view(B, L, self.hidden_dim)
-        
-        # Gated activation
-        out = F.silu(gate) * val
-        return self.w3(out)
+        return self.w3(F.silu(self.w1(x)) * self.w2(x))
 
 class Block(nn.Module):
     def __init__(self, n_embd, n_head, block_size, n_layer=6):
@@ -163,7 +144,7 @@ class Block(nn.Module):
         self.ln_1 = nn.LayerNorm(n_embd)
         self.attn = CausalSelfAttention(n_embd, n_head, block_size)
         self.ln_2 = nn.LayerNorm(n_embd)
-        self.mlp = SpatiallyGatedMLP(n_embd)
+        self.mlp = SwiGLUMLP(n_embd)
         self.scale = 1.0 / math.sqrt(2.0 * n_layer)
         
     def forward(self, x):
@@ -235,13 +216,36 @@ def train():
     scaler = torch.amp.GradScaler('cuda')
 
     
+    # Synchronize max steps at startup to prevent rank mismatch
+    max_steps = torch.tensor([int(TIME_BUDGET * 7.0)], dtype=torch.int32, device=device)
+    if ddp:
+        dist.broadcast(max_steps, src=0)
+    max_steps = max_steps.item()
+
+    # Cosine learning rate scheduler
+    def get_lr(step_idx):
+        warmup_steps = 100
+        min_lr = 8e-5
+        if step_idx < warmup_steps:
+            return LEARNING_RATE * (step_idx / warmup_steps)
+        if step_idx > max_steps:
+            return min_lr
+        decay_ratio = (step_idx - warmup_steps) / (max_steps - warmup_steps)
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (LEARNING_RATE - min_lr)
+
     if master_process:
-        print(f"Starting training (DDP: {ddp}, Time Budget: {TIME_BUDGET}s)...")
+        print(f"Starting training (DDP: {ddp}, Max Steps: {max_steps})...")
     t_start = time.time()
     step = 0
     
     model.train()
-    while True:
+    while step < max_steps:
+        # Update learning rate dynamically
+        lr = get_lr(step)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
         t0 = time.time()
         x, y = train_loader.get_batch()
         
@@ -256,22 +260,22 @@ def train():
         scaler.step(optimizer)
         scaler.update()
 
-
-        
         step += 1
         elapsed = time.time() - t_start
         
         if master_process and step % 50 == 0:
-            print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s")
+            print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s | LR: {lr:.2e}")
             
-        if elapsed >= TIME_BUDGET:
-            break
-            
+    if ddp:
+        dist.barrier()
+        dist.destroy_process_group()
+
     if master_process:
         print("Training finished. Evaluating...")
-        # Unwrap model for evaluation if using DDP
+        # Unwrap model for evaluation if using DDP and compile
         raw_model = model.module if ddp else model
-        val_loss, val_bpt, comp_ratio = evaluate_loss(raw_model, val_loader)
+        eager_model = raw_model._orig_mod if hasattr(raw_model, '_orig_mod') else raw_model
+        val_loss, val_bpt, comp_ratio = evaluate_loss(eager_model, val_loader)
         
         print("\n--- RESULTS ---")
         print(f"val_loss: {val_loss:.6f}")
