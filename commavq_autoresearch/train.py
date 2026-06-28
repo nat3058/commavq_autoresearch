@@ -14,8 +14,8 @@ from prepare import MAX_SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, FRAME_DIM, TRAIN_BIN, 
 # Hyperparameters (agent modifies these)
 # ---------------------------------------------------------------------------
 N_LAYER = 12
-N_HEAD = 10
-N_EMBD = 640
+N_HEAD = 7
+N_EMBD = 448
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
 LEARNING_RATE = 8e-4     # Restored to optimal learning rate
