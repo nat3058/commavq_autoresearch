@@ -19,7 +19,7 @@ N_EMBD = 448
 
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 1.2e-3
 WEIGHT_DECAY = 0.01
 
 
@@ -272,7 +272,7 @@ def train():
     while step < max_steps:
         # Late-stage cosine decay learning rate scheduler
         warmup_steps = 100
-        decay_start_step = int(0.8 * max_steps)
+        decay_start_step = int(0.75 * max_steps)
         if step < warmup_steps:
             current_lr = LEARNING_RATE * (step / warmup_steps)
         elif step < decay_start_step:
