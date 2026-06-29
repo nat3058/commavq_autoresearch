@@ -20,12 +20,29 @@ N_EMBD = 448
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
 LEARNING_RATE = 8e-4     # Restored to optimal learning rate
-WEIGHT_DECAY = 0.01
+WEIGHT_DECAY = 0.0
 
 
 # ---------------------------------------------------------------------------
 # GPT Model Components
 # ---------------------------------------------------------------------------
+def get_2d_sines(height, width, dim):
+    assert dim % 4 == 0, "Dimension must be divisible by 4"
+    pe = torch.zeros(height, width, dim)
+    d_model = dim // 2
+    div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+    
+    # y coordinates
+    pos_y = torch.arange(0, height).unsqueeze(1)
+    pe[:, :, 0:d_model:2] = torch.sin(pos_y * div_term).unsqueeze(1).repeat(1, width, 1)
+    pe[:, :, 1:d_model:2] = torch.cos(pos_y * div_term).unsqueeze(1).repeat(1, width, 1)
+    
+    # x coordinates
+    pos_x = torch.arange(0, width).unsqueeze(1)
+    pe[:, :, d_model::2] = torch.sin(pos_x * div_term).unsqueeze(0).repeat(height, 1, 1)
+    pe[:, :, d_model+1::2] = torch.cos(pos_x * div_term).unsqueeze(0).repeat(height, 1, 1)
+    return pe
+
 class FrameEmbedding(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, frame_dim=FRAME_DIM):
         super().__init__()
@@ -34,12 +51,20 @@ class FrameEmbedding(nn.Module):
         self.gn = nn.GroupNorm(8, token_embd_dim)
         self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
         
+        # 2D sinusoidal spatial coordinate grid embeddings
+        sines = get_2d_sines(8, 16, token_embd_dim).unsqueeze(0).unsqueeze(0)
+        self.coord_emb = nn.Parameter(sines)
+        
     def forward(self, x):
         B, L, frame_dim = x.size()
         emb = self.wte(x) # (B, L, 128, token_embd_dim)
         
+        # Reshape to grid and add spatial coordinates
+        emb = emb.view(B, L, 8, 16, -1)
+        emb = emb + self.coord_emb
+        
         # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
-        emb_grid = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
+        emb_grid = emb.permute(0, 1, 4, 2, 3).reshape(B * L, -1, 8, 16)
         emb_grid = emb_grid + F.silu(self.gn(self.conv(emb_grid)))
         
         # Reshape back to flat sequence
@@ -57,28 +82,32 @@ class FrameHead(nn.Module):
         self.gn2 = nn.GroupNorm(8, token_embd_dim)
         self.conv3 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn3 = nn.GroupNorm(8, token_embd_dim)
-        self.conv4 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
-        self.gn4 = nn.GroupNorm(8, token_embd_dim)
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
+        
+        # 2D sinusoidal spatial coordinate grid embeddings
+        sines = get_2d_sines(8, 16, token_embd_dim).unsqueeze(0).unsqueeze(0)
+        self.coord_emb = nn.Parameter(sines)
         
     def forward(self, x, wte_weight):
         B, L, C = x.size()
         features = self.proj(x) # (B, L, 128 * token_embd_dim)
         
-        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
-        features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
+        # Reshape to grid and add spatial coordinates
+        features = features.view(B, L, 8, 16, self.token_embd_dim)
+        features = features + self.coord_emb
         
-        # Spatial coordination refinement (4 residual layers)
+        # Permute to (B * L, token_embd_dim, 8, 16) for 2D convolutions
+        features = features.permute(0, 1, 4, 2, 3).reshape(B * L, self.token_embd_dim, 8, 16)
+        
+        # Spatial coordination refinement (3 residual layers)
         features = features + F.silu(self.gn1(self.conv1(features)))
         features = features + F.silu(self.gn2(self.conv2(features)))
         features = features + F.silu(self.gn3(self.conv3(features)))
-        features = features + F.silu(self.gn4(self.conv4(features)))
         
         # Reshape back to flat tokens
         features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
-        wte_weight_t = wte_weight.t().contiguous()
-        logits = torch.matmul(features, wte_weight_t) # (B, L, 128, 1024)
+        logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
         return logits
 
 
@@ -138,8 +167,6 @@ class SwiGLUMLP(nn.Module):
         super().__init__()
         hidden_dim = int(2 * (4 * n_embd) / 3)
         hidden_dim = ((hidden_dim + 7) // 8) * 8
-        if n_embd == 448:
-            hidden_dim = 1192  # Make room for 4th residual conv in FrameHead
         self.w1 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w2 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, n_embd, bias=False)
@@ -156,10 +183,16 @@ class Block(nn.Module):
         self.mlp = SwiGLUMLP(n_embd)
         self.scale = 1.0 / math.sqrt(2.0 * n_layer)
         
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x)) * self.scale
-        x = x + self.mlp(self.ln_2(x)) * self.scale
-        return x
+    def forward(self, x, survival_prob=1.0):
+        if self.training and survival_prob < 1.0:
+            if torch.rand(1).item() >= survival_prob:
+                return x
+            res = self.attn(self.ln_1(x)) * self.scale + self.mlp(self.ln_2(x)) * self.scale
+            return x + res / survival_prob
+        else:
+            x = x + self.attn(self.ln_1(x)) * self.scale
+            x = x + self.mlp(self.ln_2(x)) * self.scale
+            return x
 
 
 class GPT(nn.Module):
@@ -176,8 +209,9 @@ class GPT(nn.Module):
         
     def forward(self, idx):
         x = self.transformer.wfe(idx)
-        for _ in range(self.n_layer):
-            x = self.block(x)
+        for i in range(self.n_layer):
+            survival_prob = 1.0 - (i / self.n_layer) * 0.2
+            x = self.block(x, survival_prob)
         x = self.transformer.ln_f(x)
         
         # Tied weights classifier
@@ -185,37 +219,6 @@ class GPT(nn.Module):
         logits = self.lm_head(x, wte_weight)
         return logits
 
-
-
-class EpochDataloader:
-    def __init__(self, filename, batch_size, sequence_len):
-        import numpy as np
-        raw_data = np.fromfile(filename, dtype=np.int16)
-        self.frames = torch.from_numpy(raw_data.reshape(-1, FRAME_DIM).astype(np.int64)).cuda()
-        self.batch_size = batch_size
-        self.sequence_len = sequence_len
-        self.num_frames = len(self.frames)
-        
-        # Precompute offset tensor on GPU once
-        self.offsets = torch.arange(sequence_len, device='cuda')
-        
-        # Epoch tracking index tensor on GPU
-        self.indices = torch.randperm(self.num_frames - self.sequence_len - 1, device='cuda')
-        self.current_idx = 0
-        
-    def get_batch(self):
-        if self.current_idx + self.batch_size > len(self.indices):
-            # End of epoch: Reshuffle and reset index
-            self.indices = torch.randperm(self.num_frames - self.sequence_len - 1, device='cuda')
-            self.current_idx = 0
-            
-        ix = self.indices[self.current_idx : self.current_idx + self.batch_size]
-        self.current_idx += self.batch_size
-        
-        indices = ix.unsqueeze(1) + self.offsets.unsqueeze(0)
-        x = self.frames[indices]
-        y = self.frames[indices + 1]
-        return x, y
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +251,7 @@ def train():
     model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).to(device)
     
     # Skip compilation for short proxy runs to avoid cold start latency
-    use_compile = True
+    use_compile = TIME_BUDGET > 600
     if use_compile:
         model = torch.compile(model, mode="reduce-overhead")
         
@@ -256,8 +259,8 @@ def train():
         model = DDP(model, device_ids=[ddp_local_rank])
     
     # Setup data loaders
-    train_loader = EpochDataloader(TRAIN_BIN, BATCH_SIZE, MAX_SEQ_LEN)
-    val_loader = EpochDataloader(VAL_BIN, BATCH_SIZE, MAX_SEQ_LEN)
+    train_loader = Dataloader(TRAIN_BIN, BATCH_SIZE, MAX_SEQ_LEN)
+    val_loader = Dataloader(VAL_BIN, BATCH_SIZE, MAX_SEQ_LEN)
     
     # Optimizer and FP16 GradScaler
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95), fused=True)
@@ -273,7 +276,7 @@ def train():
         t_cal_start = time.time()
         for _ in range(10):
             cx, cy = train_loader.get_batch()
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
             with torch.amp.autocast('cuda', dtype=torch.float16):
                 clogits = model(cx)
                 closs = F.cross_entropy(clogits.view(-1, clogits.size(-1)), cy.view(-1))
@@ -312,22 +315,12 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad()
         
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
             logits = model(x)
-            # Compute unreduced cross entropy loss per spatial position
-            per_pos_loss = F.cross_entropy(
-                logits.view(-1, 128, logits.size(-1)).transpose(1, 2),
-                y.view(-1, 128),
-                reduction='none'
-            )
-            # Calculate positional difficulty weights dynamically
-            pos_difficulty = per_pos_loss.detach().mean(dim=0)
-            weights = pos_difficulty / (pos_difficulty.mean() + 1e-8)
-            # Apply weights to focus gradient capacity on hard positions
-            loss = (per_pos_loss * weights.unsqueeze(0)).mean()
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             
         scaler.scale(loss).backward()
         scaler.step(optimizer)
