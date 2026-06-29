@@ -107,8 +107,7 @@ class FrameHead(nn.Module):
         
         # Reshape back to flat tokens
         features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
-        wte_weight_t = wte_weight.t().contiguous()
-        logits = torch.matmul(features, wte_weight_t) # (B, L, 128, 1024)
+        logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
         return logits
 
 
@@ -243,7 +242,6 @@ def train():
     
     # Initialize model
     model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).to(device)
-
     
     # Skip compilation for short proxy runs to avoid cold start latency
     use_compile = True
@@ -271,7 +269,7 @@ def train():
         t_cal_start = time.time()
         for _ in range(10):
             cx, cy = train_loader.get_batch()
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
             with torch.amp.autocast('cuda', dtype=torch.float16):
                 clogits = model(cx)
                 closs = F.cross_entropy(clogits.view(-1, clogits.size(-1)), cy.view(-1))
@@ -310,7 +308,7 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad()
         
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
