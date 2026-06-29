@@ -82,7 +82,7 @@ class Dataloader:
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
-@torch.no_grad()
+@torch.inference_mode()
 def evaluate_loss(model, val_loader):
     model.eval()
     losses = []

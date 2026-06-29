@@ -63,8 +63,8 @@ class FrameEmbedding(nn.Module):
         emb = emb.view(B, L, 8, 16, -1)
         emb = emb + self.coord_emb
         
-        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
-        emb_grid = emb.permute(0, 1, 4, 2, 3).reshape(B * L, -1, 8, 16)
+        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16) in channels_last format
+        emb_grid = emb.permute(0, 1, 4, 2, 3).reshape(B * L, -1, 8, 16).to(memory_format=torch.channels_last)
         emb_grid = emb_grid + F.silu(self.gn(self.conv(emb_grid)))
         
         # Reshape back to flat sequence
@@ -97,8 +97,8 @@ class FrameHead(nn.Module):
         features = features.view(B, L, 8, 16, self.token_embd_dim)
         features = features + self.coord_emb
         
-        # Permute to (B * L, token_embd_dim, 8, 16) for 2D convolutions
-        features = features.permute(0, 1, 4, 2, 3).reshape(B * L, self.token_embd_dim, 8, 16)
+        # Permute to (B * L, token_embd_dim, 8, 16) in channels_last format
+        features = features.permute(0, 1, 4, 2, 3).reshape(B * L, self.token_embd_dim, 8, 16).to(memory_format=torch.channels_last)
         
         # Spatial coordination refinement (3 residual layers)
         features = features + F.silu(self.gn1(self.conv1(features)))
@@ -107,7 +107,8 @@ class FrameHead(nn.Module):
         
         # Reshape back to flat tokens
         features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
-        logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
+        wte_weight_t = wte_weight.t().contiguous()
+        logits = torch.matmul(features, wte_weight_t) # (B, L, 128, 1024)
         return logits
 
 
@@ -242,6 +243,7 @@ def train():
     
     # Initialize model
     model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).to(device)
+    model = model.to(memory_format=torch.channels_last)
     
     # Skip compilation for short proxy runs to avoid cold start latency
     use_compile = TIME_BUDGET > 600
@@ -269,7 +271,7 @@ def train():
         t_cal_start = time.time()
         for _ in range(10):
             cx, cy = train_loader.get_batch()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast('cuda', dtype=torch.float16):
                 clogits = model(cx)
                 closs = F.cross_entropy(clogits.view(-1, clogits.size(-1)), cy.view(-1))
@@ -308,7 +310,7 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
