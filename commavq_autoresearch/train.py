@@ -30,10 +30,8 @@ class FrameEmbedding(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, frame_dim=FRAME_DIM):
         super().__init__()
         self.wte = nn.Embedding(vocab_size, token_embd_dim)
-        self.conv1 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
-        self.gn1 = nn.GroupNorm(8, token_embd_dim)
-        self.conv2 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
-        self.gn2 = nn.GroupNorm(8, token_embd_dim)
+        self.conv = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn = nn.GroupNorm(8, token_embd_dim)
         self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
         
     def forward(self, x):
@@ -41,8 +39,7 @@ class FrameEmbedding(nn.Module):
         emb = self.wte(x) # (B, L, 128, token_embd_dim)
         # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
         emb_grid = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
-        emb_grid = emb_grid + F.silu(self.gn1(self.conv1(emb_grid)))
-        emb_grid = emb_grid + F.silu(self.gn2(self.conv2(emb_grid)))
+        emb_grid = emb_grid + F.silu(self.gn(self.conv(emb_grid)))
         # Reshape back to flat sequence
         emb = emb_grid.permute(0, 2, 3, 1).contiguous().view(B, L, -1)
         return self.proj(emb) # (B, L, n_embd)
@@ -56,8 +53,6 @@ class FrameHead(nn.Module):
         self.gn1 = nn.GroupNorm(8, token_embd_dim)
         self.conv2 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn2 = nn.GroupNorm(8, token_embd_dim)
-        self.conv3 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
-        self.gn3 = nn.GroupNorm(8, token_embd_dim)
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
         
@@ -67,10 +62,9 @@ class FrameHead(nn.Module):
         # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
         features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
         
-        # Spatial coordination refinement (3 residual layers)
+        # Spatial coordination refinement (2 residual layers)
         features = features + F.silu(self.gn1(self.conv1(features)))
         features = features + F.silu(self.gn2(self.conv2(features)))
-        features = features + F.silu(self.gn3(self.conv3(features)))
         
         # Reshape back to flat tokens
         features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
@@ -136,7 +130,7 @@ class SwiGLUMLP(nn.Module):
         hidden_dim = int(2 * (4 * n_embd) / 3)
         hidden_dim = ((hidden_dim + 7) // 8) * 8
         if n_embd == 448:
-            hidden_dim = 1168  # Make room for 2nd residual conv in FrameEmbedding
+            hidden_dim = 1224  # Expand MLP width using parameters saved from conv reduction
         self.w1 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w2 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, n_embd, bias=False)
@@ -207,17 +201,9 @@ def train():
     torch.cuda.manual_seed(42 + ddp_rank)
     torch.set_float32_matmul_precision("high")
     
-    # Enable cuDNN autotuning for faster convolutions
-    torch.backends.cudnn.benchmark = True
-    
     # Initialize model
     model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).to(device)
-    
-    # Always compile model for maximum steps/sec
-    use_compile = True
-    if use_compile:
-        model = torch.compile(model, mode="reduce-overhead")
-        
+    model = torch.compile(model, mode="reduce-overhead")
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
     
@@ -229,56 +215,18 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95), fused=True)
     scaler = torch.amp.GradScaler('cuda')
 
+    
+    if master_process:
+        print(f"Starting training (DDP: {ddp}, Time Budget: {TIME_BUDGET}s)...")
     t_start = time.time()
-
-    # Dynamically measure and sync step budget
-    if not use_compile:
-        if master_process:
-            print("Calibrating training throughput dynamically...")
-        model.train()
-        t_cal_start = time.time()
-        for _ in range(10):
-            cx, cy = train_loader.get_batch()
-            optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast('cuda', dtype=torch.float16):
-                clogits = model(cx)
-                closs = F.cross_entropy(clogits.view(-1, clogits.size(-1)), cy.view(-1))
-            scaler.scale(closs).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        torch.cuda.synchronize()
-        calibration_elapsed = time.time() - t_cal_start
-        steps_per_sec = 10.0 / calibration_elapsed
-        if master_process:
-            print(f"Dynamic calibration: {steps_per_sec:.2f} steps/sec (calibration took {calibration_elapsed:.2f}s)")
-        step = 10
-    else:
-        calibration_elapsed = 0.0
-        steps_per_sec = 7.0
-        step = 0
-
-    # Calculate step budget on Rank 0
-    if master_process:
-        max_steps = int((TIME_BUDGET - calibration_elapsed) * steps_per_sec) + step
-    else:
-        max_steps = 0
-
-    # Broadcast max_steps and step to all ranks to guarantee identical iteration counts
-    sync_tensor = torch.tensor([max_steps, step], dtype=torch.int32, device=device)
-    if ddp:
-        dist.broadcast(sync_tensor, src=0)
-    max_steps = sync_tensor[0].item()
-    step = sync_tensor[1].item()
-
-    if master_process:
-        print(f"Starting training (DDP: {ddp}, Max Steps: {max_steps})...")
+    step = 0
     
     model.train()
-    while step < max_steps:
+    while True:
         t0 = time.time()
         x, y = train_loader.get_batch()
         
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad()
         
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
@@ -289,30 +237,30 @@ def train():
         scaler.step(optimizer)
         scaler.update()
 
+
+        
         step += 1
         elapsed = time.time() - t_start
         
         if master_process and step % 50 == 0:
-            print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s | LR: {LEARNING_RATE:.2e} | Scale: {scaler.get_scale()}")
+            print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s")
+            
+        if elapsed >= TIME_BUDGET:
+            break
             
     if master_process:
         print("Training finished. Evaluating...")
-        # Unwrap model for evaluation if using DDP and compile
+        # Unwrap model for evaluation if using DDP
         raw_model = model.module if ddp else model
-        eager_model = raw_model._orig_mod if hasattr(raw_model, '_orig_mod') else raw_model
-        val_loss, val_bpt, comp_ratio = evaluate_loss(eager_model, val_loader)
+        val_loss, val_bpt, comp_ratio = evaluate_loss(raw_model, val_loader)
         
         print("\n--- RESULTS ---")
         print(f"val_loss: {val_loss:.6f}")
         print(f"val_bpt: {val_bpt:.6f}")
         print(f"comp_ratio: {comp_ratio:.6f}")
-        print(f"num_params: {sum(p.numel() for p in eager_model.parameters()):,}")
-        
-        # Save model weights
-        torch.save(eager_model.state_dict(), "model.pt")
+        print(f"num_params: {sum(p.numel() for p in raw_model.parameters()):,}")
 
     if ddp:
-        dist.barrier()
         dist.destroy_process_group()
 
 if __name__ == "__main__":
