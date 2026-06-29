@@ -26,23 +26,6 @@ WEIGHT_DECAY = 0.01
 # ---------------------------------------------------------------------------
 # GPT Model Components
 # ---------------------------------------------------------------------------
-def get_2d_sines(height, width, dim):
-    assert dim % 4 == 0, "Dimension must be divisible by 4"
-    pe = torch.zeros(height, width, dim)
-    d_model = dim // 2
-    div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-    
-    # y coordinates
-    pos_y = torch.arange(0, height).unsqueeze(1)
-    pe[:, :, 0:d_model:2] = torch.sin(pos_y * div_term).unsqueeze(1).repeat(1, width, 1)
-    pe[:, :, 1:d_model:2] = torch.cos(pos_y * div_term).unsqueeze(1).repeat(1, width, 1)
-    
-    # x coordinates
-    pos_x = torch.arange(0, width).unsqueeze(1)
-    pe[:, :, d_model::2] = torch.sin(pos_x * div_term).unsqueeze(0).repeat(height, 1, 1)
-    pe[:, :, d_model+1::2] = torch.cos(pos_x * div_term).unsqueeze(0).repeat(height, 1, 1)
-    return pe
-
 class FrameEmbedding(nn.Module):
     def __init__(self, vocab_size, token_embd_dim, n_embd, frame_dim=FRAME_DIM):
         super().__init__()
@@ -51,20 +34,12 @@ class FrameEmbedding(nn.Module):
         self.gn = nn.GroupNorm(8, token_embd_dim)
         self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
         
-        # 2D sinusoidal spatial coordinate grid embeddings
-        sines = get_2d_sines(8, 16, token_embd_dim).unsqueeze(0).unsqueeze(0)
-        self.coord_emb = nn.Parameter(sines)
-        
     def forward(self, x):
         B, L, frame_dim = x.size()
         emb = self.wte(x) # (B, L, 128, token_embd_dim)
         
-        # Reshape to grid and add spatial coordinates
-        emb = emb.view(B, L, 8, 16, -1)
-        emb = emb + self.coord_emb
-        
         # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
-        emb_grid = emb.permute(0, 1, 4, 2, 3).reshape(B * L, -1, 8, 16)
+        emb_grid = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
         emb_grid = emb_grid + F.silu(self.gn(self.conv(emb_grid)))
         
         # Reshape back to flat sequence
@@ -82,32 +57,28 @@ class FrameHead(nn.Module):
         self.gn2 = nn.GroupNorm(8, token_embd_dim)
         self.conv3 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn3 = nn.GroupNorm(8, token_embd_dim)
+        self.conv4 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn4 = nn.GroupNorm(8, token_embd_dim)
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
-        
-        # 2D sinusoidal spatial coordinate grid embeddings
-        sines = get_2d_sines(8, 16, token_embd_dim).unsqueeze(0).unsqueeze(0)
-        self.coord_emb = nn.Parameter(sines)
         
     def forward(self, x, wte_weight):
         B, L, C = x.size()
         features = self.proj(x) # (B, L, 128 * token_embd_dim)
         
-        # Reshape to grid and add spatial coordinates
-        features = features.view(B, L, 8, 16, self.token_embd_dim)
-        features = features + self.coord_emb
+        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
+        features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
         
-        # Permute to (B * L, token_embd_dim, 8, 16) for 2D convolutions
-        features = features.permute(0, 1, 4, 2, 3).reshape(B * L, self.token_embd_dim, 8, 16)
-        
-        # Spatial coordination refinement (3 residual layers)
+        # Spatial coordination refinement (4 residual layers)
         features = features + F.silu(self.gn1(self.conv1(features)))
         features = features + F.silu(self.gn2(self.conv2(features)))
         features = features + F.silu(self.gn3(self.conv3(features)))
+        features = features + F.silu(self.gn4(self.conv4(features)))
         
         # Reshape back to flat tokens
         features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
-        logits = torch.matmul(features, wte_weight.T) # (B, L, 128, 1024)
+        wte_weight_t = wte_weight.t().contiguous()
+        logits = torch.matmul(features, wte_weight_t) # (B, L, 128, 1024)
         return logits
 
 
@@ -167,6 +138,8 @@ class SwiGLUMLP(nn.Module):
         super().__init__()
         hidden_dim = int(2 * (4 * n_embd) / 3)
         hidden_dim = ((hidden_dim + 7) // 8) * 8
+        if n_embd == 448:
+            hidden_dim = 1192  # Make room for 4th residual conv in FrameHead
         self.w1 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w2 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, n_embd, bias=False)
