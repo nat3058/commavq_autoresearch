@@ -19,7 +19,7 @@ N_EMBD = 448
 
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
-LEARNING_RATE = 1.3e-3
+LEARNING_RATE = 1.4e-3
 WEIGHT_DECAY = 0.01
 
 
@@ -298,6 +298,8 @@ def train():
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
 
