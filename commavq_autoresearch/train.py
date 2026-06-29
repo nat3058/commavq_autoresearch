@@ -243,7 +243,9 @@ def train():
     
     # Initialize model
     model = GPT(VOCAB_SIZE, TOKEN_EMBD_DIM, N_EMBD, N_HEAD, N_LAYER, MAX_SEQ_LEN).to(device)
-    model = model.to(memory_format=torch.channels_last)
+    for m in model.modules():
+        if isinstance(m, nn.Conv2d):
+            m.to(memory_format=torch.channels_last)
     
     # Skip compilation for short proxy runs to avoid cold start latency
     use_compile = TIME_BUDGET > 600
