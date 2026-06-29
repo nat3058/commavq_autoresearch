@@ -14,8 +14,8 @@ from prepare import MAX_SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, FRAME_DIM, TRAIN_BIN, 
 # Hyperparameters (agent modifies these)
 # ---------------------------------------------------------------------------
 N_LAYER = 8
-N_HEAD = 6
-N_EMBD = 384
+N_HEAD = 7
+N_EMBD = 448
 
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
@@ -196,19 +196,15 @@ class GPT(nn.Module):
             wfe = FrameEmbedding(vocab_size, token_embd_dim, n_embd),
             ln_f = nn.LayerNorm(n_embd)
         ))
-        self.block_a = Block(n_embd, n_head, block_size, n_layer)
-        self.block_b = Block(n_embd, n_head, block_size, n_layer)
+        self.block = Block(n_embd, n_head, block_size, n_layer)
         self.lm_head = FrameHead(n_embd, token_embd_dim)
         self.block_size = block_size
         self.n_layer = n_layer
         
     def forward(self, idx):
         x = self.transformer.wfe(idx)
-        for i in range(self.n_layer):
-            if i % 2 == 0:
-                x = self.block_a(x)
-            else:
-                x = self.block_b(x)
+        for _ in range(self.n_layer):
+            x = self.block(x)
         x = self.transformer.ln_f(x)
         
         # Tied weights classifier
@@ -273,7 +269,7 @@ def train():
         t_cal_start = time.time()
         for _ in range(10):
             cx, cy = train_loader.get_batch()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast('cuda', dtype=torch.float16):
                 clogits = model(cx)
                 closs = F.cross_entropy(clogits.view(-1, clogits.size(-1)), cy.view(-1))
@@ -312,12 +308,22 @@ def train():
         t0 = time.time()
         x, y = train_loader.get_batch()
         
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         
         # FP16 mixed precision forward pass
         with torch.amp.autocast('cuda', dtype=torch.float16):
             logits = model(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            # Compute unreduced cross entropy loss per spatial position
+            per_pos_loss = F.cross_entropy(
+                logits.view(-1, 128, logits.size(-1)).transpose(1, 2),
+                y.view(-1, 128),
+                reduction='none'
+            )
+            # Calculate positional difficulty weights dynamically
+            pos_difficulty = per_pos_loss.detach().mean(dim=0)
+            weights = pos_difficulty / (pos_difficulty.mean() + 1e-8)
+            # Apply weights to focus gradient capacity on hard positions
+            loss = (per_pos_loss * weights.unsqueeze(0)).mean()
             
         scaler.scale(loss).backward()
         scaler.step(optimizer)
