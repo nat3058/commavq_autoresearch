@@ -214,6 +214,37 @@ class GPT(nn.Module):
 
 
 
+class EpochDataloader:
+    def __init__(self, filename, batch_size, sequence_len):
+        import numpy as np
+        raw_data = np.fromfile(filename, dtype=np.int16)
+        self.frames = torch.from_numpy(raw_data.reshape(-1, FRAME_DIM).astype(np.int64)).cuda()
+        self.batch_size = batch_size
+        self.sequence_len = sequence_len
+        self.num_frames = len(self.frames)
+        
+        # Precompute offset tensor on GPU once
+        self.offsets = torch.arange(sequence_len, device='cuda')
+        
+        # Epoch tracking index tensor on GPU
+        self.indices = torch.randperm(self.num_frames - self.sequence_len - 1, device='cuda')
+        self.current_idx = 0
+        
+    def get_batch(self):
+        if self.current_idx + self.batch_size > len(self.indices):
+            # End of epoch: Reshuffle and reset index
+            self.indices = torch.randperm(self.num_frames - self.sequence_len - 1, device='cuda')
+            self.current_idx = 0
+            
+        ix = self.indices[self.current_idx : self.current_idx + self.batch_size]
+        self.current_idx += self.batch_size
+        
+        indices = ix.unsqueeze(1) + self.offsets.unsqueeze(0)
+        x = self.frames[indices]
+        y = self.frames[indices + 1]
+        return x, y
+
+
 # ---------------------------------------------------------------------------
 # Training Execution
 # ---------------------------------------------------------------------------
@@ -252,8 +283,8 @@ def train():
         model = DDP(model, device_ids=[ddp_local_rank])
     
     # Setup data loaders
-    train_loader = Dataloader(TRAIN_BIN, BATCH_SIZE, MAX_SEQ_LEN)
-    val_loader = Dataloader(VAL_BIN, BATCH_SIZE, MAX_SEQ_LEN)
+    train_loader = EpochDataloader(TRAIN_BIN, BATCH_SIZE, MAX_SEQ_LEN)
+    val_loader = EpochDataloader(VAL_BIN, BATCH_SIZE, MAX_SEQ_LEN)
     
     # Optimizer and FP16 GradScaler
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.95), fused=True)
