@@ -19,8 +19,8 @@ N_EMBD = 448
 
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
-LEARNING_RATE = 8e-4     # Restored to optimal learning rate
-WEIGHT_DECAY = 0.01
+LEARNING_RATE = 9e-4
+WEIGHT_DECAY = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +269,15 @@ def train():
     
     model.train()
     while step < max_steps:
+        # 100-step linear learning rate warmup
+        warmup_steps = 100
+        if step < warmup_steps:
+            current_lr = LEARNING_RATE * (step / warmup_steps)
+        else:
+            current_lr = LEARNING_RATE
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
+
         t0 = time.time()
         x, y = train_loader.get_batch()
         
@@ -287,7 +296,7 @@ def train():
         elapsed = time.time() - t_start
         
         if master_process and step % 50 == 0:
-            print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s | LR: {LEARNING_RATE:.2e} | Scale: {scaler.get_scale()}")
+            print(f"Step {step} | Loss: {loss.item():.4f} | Time: {elapsed:.1f}s | LR: {current_lr:.2e} | Scale: {scaler.get_scale()}")
             
     if master_process:
         print("Training finished. Evaluating...")
