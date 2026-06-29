@@ -19,8 +19,8 @@ N_EMBD = 448
 
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
-LEARNING_RATE = 9e-4
-WEIGHT_DECAY = 0.05
+LEARNING_RATE = 8e-4     # Restored to optimal learning rate
+WEIGHT_DECAY = 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +53,8 @@ class FrameHead(nn.Module):
         self.gn1 = nn.GroupNorm(8, token_embd_dim)
         self.conv2 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn2 = nn.GroupNorm(8, token_embd_dim)
+        self.conv3 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
+        self.gn3 = nn.GroupNorm(8, token_embd_dim)
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
         
@@ -62,9 +64,10 @@ class FrameHead(nn.Module):
         # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
         features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
         
-        # Spatial coordination refinement (2 residual layers)
+        # Spatial coordination refinement (3 residual layers)
         features = features + F.silu(self.gn1(self.conv1(features)))
         features = features + F.silu(self.gn2(self.conv2(features)))
+        features = features + F.silu(self.gn3(self.conv3(features)))
         
         # Reshape back to flat tokens
         features = features.permute(0, 2, 3, 1).contiguous().view(B, L, self.frame_dim, self.token_embd_dim)
@@ -129,8 +132,6 @@ class SwiGLUMLP(nn.Module):
         super().__init__()
         hidden_dim = int(2 * (4 * n_embd) / 3)
         hidden_dim = ((hidden_dim + 7) // 8) * 8
-        if n_embd == 448:
-            hidden_dim = 1216  # Expand MLP width to 1216 using saved parameters from conv reduction
         self.w1 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w2 = nn.Linear(n_embd, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, n_embd, bias=False)
@@ -269,12 +270,20 @@ def train():
     
     model.train()
     while step < max_steps:
-        # 100-step linear learning rate warmup
+        # Late-stage cosine decay learning rate scheduler
         warmup_steps = 100
+        decay_start_step = int(0.8 * max_steps)
         if step < warmup_steps:
             current_lr = LEARNING_RATE * (step / warmup_steps)
-        else:
+        elif step < decay_start_step:
             current_lr = LEARNING_RATE
+        else:
+            # Cosine decay from LEARNING_RATE to 8e-5
+            min_lr = 8e-5
+            decay_ratio = (step - decay_start_step) / (max_steps - decay_start_step)
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+            current_lr = min_lr + coeff * (LEARNING_RATE - min_lr)
+            
         for param_group in optimizer.param_groups:
             param_group['lr'] = current_lr
 
