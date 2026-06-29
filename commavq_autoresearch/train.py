@@ -19,7 +19,7 @@ N_EMBD = 448
 
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
-LEARNING_RATE = 8e-4     # Restored to optimal learning rate
+LEARNING_RATE = 9e-4
 WEIGHT_DECAY = 0.01
 
 
