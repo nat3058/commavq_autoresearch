@@ -246,7 +246,7 @@ def train():
 
     
     # Skip compilation for short proxy runs to avoid cold start latency
-    use_compile = TIME_BUDGET > 600
+    use_compile = True
     if use_compile:
         model = torch.compile(model, mode="reduce-overhead")
         
