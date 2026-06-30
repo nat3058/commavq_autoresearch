@@ -6,7 +6,7 @@ import websocket
 import requests
 import subprocess
 
-JUPYTER_URL = "https://kkb-production.jupyter-proxy.kaggle.net/k/331131220/eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2IiwidHlwIjoiSldUIn0..Yq5GCmuHmIafluaaywnEVw.2g6Pa2BgTG00hngOkIcJjfJ_tQQbBvmuvU0mavP4DICiwz1MumfWD-8riVn5AB_oqbwZykBGo5XKaCLVLTC3aLjgwMNX5G59e7guGeNmXsC0Ma78GgO9bmsqUTJ6FrhyBHen5NANSaTAFzgneb3tf_ee5p0b0xWRcr8HE2jnA8hcDOx56DIqbWE3pWZuhLCIjjmQ0nnoBCjjXoIgpSEY462FJw4x3CRmLvkzo-qOxcQ.zHLrnRZD2HcJSqFf3YtyPw/proxy"
+JUPYTER_URL = "https://kkb-production.jupyter-proxy.kaggle.net/k/331406314/eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JDLUhTMjU2IiwidHlwIjoiSldUIn0..3m9BK6_S2QKqQ1LFYsuveg.q6Ca0ofJHkjCejGzaDSsd2esf8fXct0IYekoErWZsiKgE-GW3UY0oc_ycqPvubMR8EyP83nxhRozeAbv6YwnGL1bOtYfP70PZ-F8q-YipUNQDgf7xhSmsxz_aSblGvTKSW5UIE0L4K8dxYUOyN5YNlWOiuRRPfRyCO8YKVoHZP6CTyCbdbsGz3qUT0Icb3JeRfkXy_zLBhcEebTyxCHburCAD0dvj_m-SLSHmpyPzXuQkbw-9Cxm2W_5150OsQmN.bJidcUoRn0DoMCMy7Du0nw/proxy"
 BEST_SCORE_FILE = os.path.join(os.path.dirname(__file__), "best_score.json")
 
 def get_active_kernel_id():
@@ -166,6 +166,7 @@ def run_experiment():
     description = sys.argv[1] if len(sys.argv) > 1 else "baseline"
 
     train_path = "commavq_autoresearch/train.py"
+    tsv_path = "commavq_autoresearch/results.tsv"
     if improved:
         print(f"\n[NEW BEST] Improved validation loss to {val_loss:.6f}!")
         subprocess.run(["git", "add", train_path], check=True)
@@ -186,6 +187,12 @@ def run_experiment():
             
         with open(results_tsv, 'a', encoding='utf-8') as f:
             f.write(f"{commit_hash}\t{val_loss:.6f}\t{val_bpt:.6f}\t{comp_ratio:.6f}\tkeep\t{description}\n")
+
+        # Commit results.tsv and push to GitHub
+        subprocess.run(["git", "add", tsv_path], check=True)
+        subprocess.run(["git", "commit", "-m", f"Update results.tsv for keep: {description}"], check=True)
+        print("Pushing to GitHub...")
+        subprocess.run(["git", "push", "origin", "master"], check=True)
     else:
         print(f"\n[NO IMPROVEMENT] val_loss = {val_loss:.6f} (best is {best_loss:.6f}). Reverting train.py...")
         subprocess.run(["git", "checkout", "--", train_path], check=True)
@@ -193,6 +200,12 @@ def run_experiment():
         
         with open(results_tsv, 'a', encoding='utf-8') as f:
             f.write(f"discard\t{val_loss:.6f}\t{val_bpt:.6f}\t{comp_ratio:.6f}\tdiscard\t{description}\n")
+
+        # Commit results.tsv and push to GitHub
+        subprocess.run(["git", "add", tsv_path], check=True)
+        subprocess.run(["git", "commit", "-m", f"Update results.tsv for discard: {description}"], check=True)
+        print("Pushing to GitHub...")
+        subprocess.run(["git", "push", "origin", "master"], check=True)
 
 
 if __name__ == "__main__":
