@@ -1,79 +1,79 @@
-commit	val_loss	val_bpt	comp_ratio	runtime_s	steps_per_sec	status	description
-69f6b7a	5.180578	7.473994	1.337973	300.0	7.00	keep	baseline
-5f039b9	5.037382	7.267406	1.376007	300.0	7.00	keep	9M-DDP: 6 layers, 8 heads, 256 embd, 64 token_embd, 2x GPUs
-discard	5.053121	7.290113	1.371721	300.0	7.00	discard	Swap GELU MLP with SwiGLU MLP
-discard	5.944676	8.576355	1.165996	300.0	7.00	discard	Increase context length to 64 frames
-c5b8b27	4.768760	6.879867	1.453517	300.0	7.00	keep	DDP-9M-FP16: autotuned mixed precision, 2x GPUs
-discard	5.003696	7.218807	1.385270	300.0	7.00	discard	Cosine LR scheduler with warmup
-discard	5.068116	7.311746	1.367662	300.0	7.00	discard	Replace LayerNorm with RMSNorm
-discard	5.362741	7.736799	1.292524	300.0	7.00	discard	Double batch size to 128 and scale LR to 1.2e-3
-a11c00f	4.745645	6.846519	1.460596	300.0	7.00	keep	Implement Rotary Positional Embeddings (RoPE)
-discard	6.046900	8.723833	1.146285	300.0	7.00	discard	Implement Grouped-Query Attention (GQA) with 2 KV heads
-discard	4.746261	6.847408	1.460407	300.0	7.00	discard	Implement residual scaling by 1/sqrt(2*n_layer)
-7f4cb13	4.733081	6.828392	1.464474	300.0	7.00	keep	Reduce N_HEAD from 8 to 4 (increase head dim to 64)
-discard	4.743196	6.842985	1.461351	300.0	7.00	discard	Increase N_LAYER from 6 to 7
-discard	4.829860	6.968015	1.435129	300.0	7.00	discard	Tune LEARNING_RATE to 6e-4
-216941f	4.096462	5.909945	1.692063	300.0	7.00	keep	Implement Alternating Weight Sharing (AWS) with N_EMBD=384, N_HEAD=6
-discard	6.201259	8.946525	1.117752	300.0	7.00	discard	AWS: Increase repeated layers from 6 to 10
-discard	6.570321	9.478970	1.054967	300.0	7.00	discard	Implement Single Shared Block (SSB) with N_EMBD=448, N_HEAD=7, N_LAYER=8
-6028a33	3.825794	5.519454	1.811773	300.0	7.00	keep	Tune AdamW betas to (0.9, 0.95)
-discard	3.828518	5.523384	1.810484	300.0	7.00	discard	Tune WEIGHT_DECAY to 0.1
-discard	3.846277	5.549005	1.802125	300.0	7.00	discard	Implement linear learning rate warmup over 200 steps
-discard	3.897833	5.623385	1.778288	300.0	7.00	discard	Implement Parallel MLP and Attention (GPT-J style)
-discard	4.205429	6.067152	1.648220	300.0	7.00	discard	Implement Spatial 2D Convolutional Frame Embedding
-discard	4.221241	6.089963	1.642046	300.0	7.00	discard	Tune SwiGLU hidden dim to 2*n_embd
-discard	3.948708	5.696782	1.755377	300.0	7.00	discard	Implement Spatial-Temporal Frame-Parallel Transformer (ST-FPT)
-discard	3.989357	5.755425	1.737491	300.0	7.00	discard	Implement Time-Based Cosine Decay (TBCD) schedule
-74e33c3	3.815809	5.505049	1.816514	300.0	7.00	keep	Implement Spatially-Coordinated Parallel Head (SCPH)
-discard	3.858307	5.566360	1.796506	300.0	7.00	discard	AWS-SCPH: Increase coordination layers from 2 to 3
-9e0dd0e	3.785773	5.461717	1.830926	300.0	7.00	keep	Implement Symmetric Spatial-Temporal Convolutions (SSTC)
-discard	4.827718	6.964925	1.435766	300.0	7.00	discard	Implement SPVT Baseline
-discard	4.766777	6.877005	1.454121	300.0	7.00	discard	Implement Symmetric Semi-Preserved Convolutional Projection (S-SPCP)
-discard	3.798055	5.479435	1.825006	300.0	7.00	discard	SSTC: Swap convolution activations to GELU
-discard	3.808901	5.495083	1.819809	300.0	7.00	discard	SSTC-MSCM: Implement Multi-Scale Causal Masking (MSCM)
-discard	3.799330	5.481275	1.824393	300.0	7.00	discard	SSTC-MSCM: Implement Multi-Scale Causal Masking (MSCM)
-discard	4.085177	5.893664	1.696737	300.0	7.00	discard	SSTC-CTC: Causal 1D Temporal Convolutions (CTC)
-discard	4.372038	6.307517	1.585410	300.0	7.00	discard	SSTC-MQA: Multi-Query Attention with N_EMBD=640
-discard	3.863989	5.574558	1.793864	300.0	7.00	discard	SSTC-MQA: Multi-Query Attention with N_EMBD=448, N_LAYER=12
-discard	4.312325	6.221370	1.607363	300.0	7.00	discard	SSTC-CDLR: Cosine Decelerating Learning Rate
-discard	4.031556	5.816306	1.719304	300.0	7.00	discard	SSTC-LR: Tune LEARNING_RATE to 1e-3
-discard	5.761666	8.312327	1.203033	300.0	7.00	discard	SSTC-ICEA: Implicit Coordinate-Enhanced Attention (ICEA) + Sines + Clip + Smooth
-discard	5.749648	8.294988	1.205547	300.0	7.00	discard	SSTC-ICEA: Implicit Coordinate-Enhanced Attention (ICEA) + Sines Pos Init
-discard	4.607682	6.647480	1.504329	300.0	7.00	discard	SSTC-ICEA: Implicit Coordinate-Enhanced Attention (ICEA) + Sines Pos Init
-discard	4.617405	6.661508	1.501162	300.0	7.00	discard	SSTC-ICEA: Implicit Coordinate-Enhanced Attention (ICEA) + Sines Pos Init
-discard	3.901153	5.628174	1.776775	300.0	7.00	discard	SSTC-ICEA: Implicit Coordinate-Enhanced Attention (ICEA) + Sines Pos Init
-discard	3.907921	5.637938	1.773698	300.0	7.00	discard	SSTC-OPT: Baseline with WEIGHT_DECAY=0.0
-discard	4.177154	6.026360	1.659377	300.0	7.00	discard	SSTC-AWS: Alternating Weight Sharing (AWS) with modern recipe
-discard	3.898440	5.624260	1.778012	300.0	7.00	discard	SSTC-OPT: Dynamic per-position difficulty loss weighting
-discard	3.879532	5.596981	1.786677	300.0	7.00	discard	SSTC-OPT: EpochDataloader (sampling without replacement)
-discard	3.821591	5.513390	1.813766	300.0	7.00	discard	SSTC-FH4: 4th residual conv layer in FrameHead
-discard	4.606214	6.645362	1.504809	300.0	7.00	discard	SSTC-SD: Stochastic Depth regularizer (p=0.2)
-discard	3.810629	5.497575	1.818984	300.0	7.00	discard	SSTC-FE2: 2nd residual conv layer in FrameEmbedding
-discard	3.823979	5.516836	1.812633	300.0	7.00	discard	SSTC-WMLP: wider SwiGLU MLP (1216 dim) + 2 residual convs in head
-discard	3.789640	5.467294	1.829058	300.0	7.00	discard	SSTC-OPT: Warmup LR to 9e-4 + Weight Decay 0.05
-fde49fe	3.783736	5.458778	1.831912	300.0	7.00	keep	SSTC-OPT: Late-stage cosine decay (starting at 80% steps)
-961edde	3.736996	5.391346	1.854825	300.0	7.00	keep	SSTC-OPT: Late decay with 9e-4 peak LR
-9e5e707	3.706735	5.347688	1.869967	300.0	7.00	keep	SSTC-OPT: Late decay with 1e-3 peak LR
-8bc5bf1	3.668278	5.292206	1.889571	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.2e-3 peak LR
-discard	3.671698	5.297140	1.887811	300.0	7.00	discard	SSTC-OPT: Late decay at 70% steps with 1.2e-3 peak LR
-1aa7019	3.657554	5.276734	1.895111	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.3e-3 peak LR
-fc299db	3.640591	5.252262	1.903942	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.4e-3 peak LR + Grad Clip 1.0
-ccc68e5	3.630148	5.237197	1.909418	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.5e-3 peak LR + Grad Clip 1.0
-d187ff2	3.620286	5.222969	1.914620	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.6e-3 peak LR + Grad Clip 1.0
-1801078	3.614345	5.214397	1.917767	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.7e-3 peak LR + Grad Clip 1.0
-571c480	3.604014	5.199493	1.923264	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.8e-3 peak LR + Grad Clip 1.0
-eabf0a2	3.599793	5.193404	1.925519	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.9e-3 peak LR + Grad Clip 1.0
-0bb111c	3.591811	5.181888	1.929799	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.0e-3 peak LR + Grad Clip 1.0
-9db00ed	3.585277	5.172461	1.933316	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.1e-3 peak LR + Grad Clip 1.0
-43d6baa	3.581682	5.167275	1.935256	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.2e-3 peak LR + Grad Clip 1.0
-35787b9	3.572740	5.154374	1.940100	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.3e-3 peak LR + Grad Clip 1.0
-7b11f75	3.568734	5.148595	1.942278	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.4e-3 peak LR + Grad Clip 1.0
-3952c22	3.567134	5.146287	1.943149	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.5e-3 peak LR + Grad Clip 1.0
-5a0ab1f	3.562079	5.138994	1.945906	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.6e-3 peak LR + Grad Clip 1.0
-755ca2e	3.555872	5.130038	1.949303	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.7e-3 peak LR + Grad Clip 1.0
-852df35	3.552416	5.125053	1.951199	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.8e-3 peak LR + Grad Clip 1.0
-discard	3.569922	5.150309	1.941631	300.0	7.00	discard	SSTC-GP: Grouped Linear Projections baseline (G=8, 3.55M params)
-d90a331	2.886602	4.164486	2.401257	363.0	5.78	keep	SSTC-GP-WIDE: Scale model to N_EMBD=768, N_HEAD=12 (8.87M params total)
-2d558d9	2.829563	4.082196	2.449662	664.0	3.16	keep	SSTC-GP-WIDE: Scale batch size to 128 and peak LR to 4.0e-3
-c4b72c6	2.823589	4.073578	2.454844	627.0	3.35	keep	SSTC-GP-WIDE: Adjust WEIGHT_DECAY to 0.02
-dca663c	2.817456	4.064730	2.460188	621.0	3.38	keep	SSTC-GP-WIDE: Adjust WEIGHT_DECAY to 0.03
+commit	val_loss	val_bpt	comp_ratio	num_params	runtime_s	steps_per_sec	status	description
+69f6b7a	5.180578	7.473994	1.337973	9,200,000	300.0	7.00	keep	baseline
+5f039b9	5.037382	7.267406	1.376007	9,200,000	300.0	7.00	keep	9M-DDP: 6 layers, 8 heads, 256 embd, 64 token_embd, 2x GPUs
+discard	5.053121	7.290113	1.371721	9,200,000	300.0	7.00	discard	Swap GELU MLP with SwiGLU MLP
+discard	5.944676	8.576355	1.165996	9,200,000	300.0	7.00	discard	Increase context length to 64 frames
+c5b8b27	4.768760	6.879867	1.453517	9,971,840	300.0	7.00	keep	DDP-9M-FP16: autotuned mixed precision, 2x GPUs
+discard	5.003696	7.218807	1.385270	9,971,840	300.0	7.00	discard	Cosine LR scheduler with warmup
+discard	5.068116	7.311746	1.367662	9,971,840	300.0	7.00	discard	Replace LayerNorm with RMSNorm
+discard	5.362741	7.736799	1.292524	9,971,840	300.0	7.00	discard	Double batch size to 128 and scale LR to 1.2e-3
+a11c00f	4.745645	6.846519	1.460596	9,971,840	300.0	7.00	keep	Implement Rotary Positional Embeddings (RoPE)
+discard	6.046900	8.723833	1.146285	9,971,840	300.0	7.00	discard	Implement Grouped-Query Attention (GQA) with 2 KV heads
+discard	4.746261	6.847408	1.460407	9,971,840	300.0	7.00	discard	Implement residual scaling by 1/sqrt(2*n_layer)
+7f4cb13	4.733081	6.828392	1.464474	9,971,840	300.0	7.00	keep	Reduce N_HEAD from 8 to 4 (increase head dim to 64)
+discard	4.743196	6.842985	1.461351	9,971,840	300.0	7.00	discard	Increase N_LAYER from 6 to 7
+discard	4.829860	6.968015	1.435129	9,971,840	300.0	7.00	discard	Tune LEARNING_RATE to 6e-4
+216941f	4.096462	5.909945	1.692063	9,971,840	300.0	7.00	keep	Implement Alternating Weight Sharing (AWS) with N_EMBD=384, N_HEAD=6
+discard	6.201259	8.946525	1.117752	9,971,840	300.0	7.00	discard	AWS: Increase repeated layers from 6 to 10
+discard	6.570321	9.478970	1.054967	9,971,840	300.0	7.00	discard	Implement Single Shared Block (SSB) with N_EMBD=448, N_HEAD=7, N_LAYER=8
+6028a33	3.825794	5.519454	1.811773	9,971,840	300.0	7.00	keep	Tune AdamW betas to (0.9, 0.95)
+discard	3.828518	5.523384	1.810484	9,971,840	300.0	7.00	discard	Tune WEIGHT_DECAY to 0.1
+discard	3.846277	5.549005	1.802125	9,971,840	300.0	7.00	discard	Implement linear learning rate warmup over 200 steps
+discard	3.897833	5.623385	1.778288	9,971,840	300.0	7.00	discard	Implement Parallel MLP and Attention (GPT-J style)
+discard	4.205429	6.067152	1.648220	9,971,840	300.0	7.00	discard	Implement Spatial 2D Convolutional Frame Embedding
+discard	4.221241	6.089963	1.642046	9,971,840	300.0	7.00	discard	Tune SwiGLU hidden dim to 2*n_embd
+discard	3.948708	5.696782	1.755377	9,971,840	300.0	7.00	discard	Implement Spatial-Temporal Frame-Parallel Transformer (ST-FPT)
+discard	3.989357	5.755425	1.737491	9,971,840	300.0	7.00	discard	Implement Time-Based Cosine Decay (TBCD) schedule
+74e33c3	3.815809	5.505049	1.816514	9,971,840	300.0	7.00	keep	Implement Spatially-Coordinated Parallel Head (SCPH)
+discard	3.858307	5.566360	1.796506	9,971,840	300.0	7.00	discard	AWS-SCPH: Increase coordination layers from 2 to 3
+9e0dd0e	3.785773	5.461717	1.830926	9,971,840	300.0	7.00	keep	Implement Symmetric Spatial-Temporal Convolutions (SSTC)
+discard	4.827718	6.964925	1.435766	9,971,840	300.0	7.00	discard	Implement SPVT Baseline
+discard	4.766777	6.877005	1.454121	9,971,840	300.0	7.00	discard	Implement Symmetric Semi-Preserved Convolutional Projection (S-SPCP)
+discard	3.798055	5.479435	1.825006	9,971,840	300.0	7.00	discard	SSTC: Swap convolution activations to GELU
+discard	3.808901	5.495083	1.819809	9,971,840	300.0	7.00	discard	SSTC-MSCM: Implement Multi-Scale Causal Masking (MSCM)
+discard	3.799330	5.481275	1.824393	9,971,840	300.0	7.00	discard	SSTC-MSCM: Implement Multi-Scale Causal Masking (MSCM)
+discard	4.085177	5.893664	1.696737	9,971,840	300.0	7.00	discard	SSTC-CTC: Causal 1D Temporal Convolutions (CTC)
+discard	4.372038	6.307517	1.585410	9,971,840	300.0	7.00	discard	SSTC-MQA: Multi-Query Attention with N_EMBD=640
+discard	3.863989	5.574558	1.793864	9,971,840	300.0	7.00	discard	SSTC-MQA: Multi-Query Attention with N_EMBD=448, N_LAYER=12
+discard	4.312325	6.221370	1.607363	9,971,840	300.0	7.00	discard	SSTC-CDLR: Cosine Decelerating Learning Rate
+discard	4.031556	5.816306	1.719304	9,971,840	300.0	7.00	discard	SSTC-LR: Tune LEARNING_RATE to 1e-3
+discard	5.761666	8.312327	1.203033	9,971,840	300.0	7.00	discard	SSTC-ICEA: Implicit Coordinate-Enhanced Attention (ICEA) + Sines + Clip + Smooth
+discard	5.749648	8.294988	1.205547	9,971,840	300.0	7.00	discard	SSTC-ICEA: Implicit Coordinate-Enhanced Attention (ICEA) + Sines Pos Init
+discard	4.607682	6.647480	1.504329	9,971,840	300.0	7.00	discard	SSTC-ICEA: Implicit Coordinate-Enhanced Attention (ICEA) + Sines Pos Init
+discard	4.617405	6.661508	1.501162	9,971,840	300.0	7.00	discard	SSTC-ICEA: Implicit Coordinate-Enhanced Attention (ICEA) + Sines Pos Init
+discard	3.901153	5.628174	1.776775	9,971,840	300.0	7.00	discard	SSTC-ICEA: Implicit Coordinate-Enhanced Attention (ICEA) + Sines Pos Init
+discard	3.907921	5.637938	1.773698	9,971,840	300.0	7.00	discard	SSTC-OPT: Baseline with WEIGHT_DECAY=0.0
+discard	4.177154	6.026360	1.659377	9,971,840	300.0	7.00	discard	SSTC-AWS: Alternating Weight Sharing (AWS) with modern recipe
+discard	3.898440	5.624260	1.778012	9,971,840	300.0	7.00	discard	SSTC-OPT: Dynamic per-position difficulty loss weighting
+discard	3.879532	5.596981	1.786677	9,971,840	300.0	7.00	discard	SSTC-OPT: EpochDataloader (sampling without replacement)
+discard	3.821591	5.513390	1.813766	9,971,840	300.0	7.00	discard	SSTC-FH4: 4th residual conv layer in FrameHead
+discard	4.606214	6.645362	1.504809	9,971,840	300.0	7.00	discard	SSTC-SD: Stochastic Depth regularizer (p=0.2)
+discard	3.810629	5.497575	1.818984	9,971,840	300.0	7.00	discard	SSTC-FE2: 2nd residual conv layer in FrameEmbedding
+discard	3.823979	5.516836	1.812633	9,971,840	300.0	7.00	discard	SSTC-WMLP: wider SwiGLU MLP (1216 dim) + 2 residual convs in head
+discard	3.789640	5.467294	1.829058	9,971,840	300.0	7.00	discard	SSTC-OPT: Warmup LR to 9e-4 + Weight Decay 0.05
+fde49fe	3.783736	5.458778	1.831912	9,971,840	300.0	7.00	keep	SSTC-OPT: Late-stage cosine decay (starting at 80% steps)
+961edde	3.736996	5.391346	1.854825	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay with 9e-4 peak LR
+9e5e707	3.706735	5.347688	1.869967	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay with 1e-3 peak LR
+8bc5bf1	3.668278	5.292206	1.889571	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.2e-3 peak LR
+discard	3.671698	5.297140	1.887811	9,971,840	300.0	7.00	discard	SSTC-OPT: Late decay at 70% steps with 1.2e-3 peak LR
+1aa7019	3.657554	5.276734	1.895111	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.3e-3 peak LR
+fc299db	3.640591	5.252262	1.903942	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.4e-3 peak LR + Grad Clip 1.0
+ccc68e5	3.630148	5.237197	1.909418	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.5e-3 peak LR + Grad Clip 1.0
+d187ff2	3.620286	5.222969	1.914620	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.6e-3 peak LR + Grad Clip 1.0
+1801078	3.614345	5.214397	1.917767	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.7e-3 peak LR + Grad Clip 1.0
+571c480	3.604014	5.199493	1.923264	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.8e-3 peak LR + Grad Clip 1.0
+eabf0a2	3.599793	5.193404	1.925519	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 1.9e-3 peak LR + Grad Clip 1.0
+0bb111c	3.591811	5.181888	1.929799	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.0e-3 peak LR + Grad Clip 1.0
+9db00ed	3.585277	5.172461	1.933316	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.1e-3 peak LR + Grad Clip 1.0
+43d6baa	3.581682	5.167275	1.935256	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.2e-3 peak LR + Grad Clip 1.0
+35787b9	3.572740	5.154374	1.940100	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.3e-3 peak LR + Grad Clip 1.0
+7b11f75	3.568734	5.148595	1.942278	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.4e-3 peak LR + Grad Clip 1.0
+3952c22	3.567134	5.146287	1.943149	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.5e-3 peak LR + Grad Clip 1.0
+5a0ab1f	3.562079	5.138994	1.945906	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.6e-3 peak LR + Grad Clip 1.0
+755ca2e	3.555872	5.130038	1.949303	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.7e-3 peak LR + Grad Clip 1.0
+852df35	3.552416	5.125053	1.951199	9,971,840	300.0	7.00	keep	SSTC-OPT: Late decay at 75% steps with 2.8e-3 peak LR + Grad Clip 1.0
+discard	3.569922	5.150309	1.941631	3,549,312	300.0	7.00	discard	SSTC-GP: Grouped Linear Projections baseline (G=8, 3.55M params)
+d90a331	2.886602	4.164486	2.401257	8,868,864	363.0	5.78	keep	SSTC-GP-WIDE: Scale model to N_EMBD=768, N_HEAD=12 (8.87M params total)
+2d558d9	2.829563	4.082196	2.449662	8,868,864	664.0	3.16	keep	SSTC-GP-WIDE: Scale batch size to 128 and peak LR to 4.0e-3
+c4b72c6	2.823589	4.073578	2.454844	8,868,864	627.0	3.35	keep	SSTC-GP-WIDE: Adjust WEIGHT_DECAY to 0.02
+dca663c	2.817456	4.064730	2.460188	8,868,864	621.0	3.38	keep	SSTC-GP-WIDE: Adjust WEIGHT_DECAY to 0.03
