@@ -21,6 +21,7 @@ TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 64          # Batch size per GPU (effective batch size = 128)
 LEARNING_RATE = 2.8e-3
 WEIGHT_DECAY = 0.01
+N_GROUPS = 8
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +33,12 @@ class FrameEmbedding(nn.Module):
         self.wte = nn.Embedding(vocab_size, token_embd_dim)
         self.conv = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn = nn.GroupNorm(8, token_embd_dim)
-        self.proj = nn.Linear(frame_dim * token_embd_dim, n_embd, bias=False)
+        self.proj_groups = nn.ModuleList([
+            nn.Linear((frame_dim // N_GROUPS) * token_embd_dim, n_embd // N_GROUPS, bias=False)
+            for _ in range(N_GROUPS)
+        ])
+        self.n_groups = N_GROUPS
+        self.frame_dim = frame_dim
         
     def forward(self, x):
         B, L, frame_dim = x.size()
@@ -41,14 +47,22 @@ class FrameEmbedding(nn.Module):
         emb_grid = emb.view(B * L, 8, 16, emb.size(-1)).permute(0, 3, 1, 2)
         emb_grid = emb_grid + F.silu(self.gn(self.conv(emb_grid)))
         # Reshape back to flat sequence
-        emb = emb_grid.permute(0, 2, 3, 1).contiguous().view(B, L, -1)
-        return self.proj(emb) # (B, L, n_embd)
+        emb = emb_grid.permute(0, 2, 3, 1).contiguous().view(B, L, self.n_groups, -1)
+        
+        # Grouped projection
+        outputs = []
+        for i, proj in enumerate(self.proj_groups):
+            outputs.append(proj(emb[:, :, i, :]))
+        return torch.cat(outputs, dim=-1) # (B, L, n_embd)
 
 
 class FrameHead(nn.Module):
     def __init__(self, n_embd, token_embd_dim, frame_dim=FRAME_DIM):
         super().__init__()
-        self.proj = nn.Linear(n_embd, frame_dim * token_embd_dim, bias=False)
+        self.proj_groups = nn.ModuleList([
+            nn.Linear(n_embd // N_GROUPS, (frame_dim // N_GROUPS) * token_embd_dim, bias=False)
+            for _ in range(N_GROUPS)
+        ])
         self.conv1 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn1 = nn.GroupNorm(8, token_embd_dim)
         self.conv2 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
@@ -57,10 +71,16 @@ class FrameHead(nn.Module):
         self.gn3 = nn.GroupNorm(8, token_embd_dim)
         self.frame_dim = frame_dim
         self.token_embd_dim = token_embd_dim
+        self.n_groups = N_GROUPS
         
     def forward(self, x, wte_weight):
         B, L, C = x.size()
-        features = self.proj(x) # (B, L, 128 * token_embd_dim)
+        x_chunks = torch.chunk(x, self.n_groups, dim=-1)
+        outputs = []
+        for i, proj in enumerate(self.proj_groups):
+            outputs.append(proj(x_chunks[i]))
+        features = torch.cat(outputs, dim=-1) # (B, L, 128 * token_embd_dim)
+        
         # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
         features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
         
