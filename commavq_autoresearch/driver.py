@@ -121,6 +121,8 @@ def run_experiment():
     val_loss = None
     val_bpt = None
     comp_ratio = None
+    runtime_s = None
+    steps_per_sec = None
     
     for line in output.split('\n'):
         if line.startswith("val_loss:"):
@@ -129,15 +131,33 @@ def run_experiment():
             val_bpt = float(line.split(":")[1].strip())
         elif line.startswith("comp_ratio:"):
             comp_ratio = float(line.split(":")[1].strip())
-            
+        elif "Dynamic calibration:" in line:
+            try:
+                # Format: Dynamic calibration: 3.16 steps/sec (10 steps took 3.16s)
+                steps_per_sec = float(line.split("Dynamic calibration:")[1].split("steps/sec")[0].strip())
+            except Exception as e:
+                print(f"Warning: Failed to parse steps_per_sec: {e}")
+        elif "| Time:" in line:
+            try:
+                # Format: Step 2100 | Loss: 3.4311 | Time: 300.9s | LR: ...
+                time_str = line.split("| Time:")[1].split("|")[0].strip() # "300.9s"
+                runtime_s = float(time_str.rstrip('s'))
+            except Exception as e:
+                pass
+                
     if val_loss is None or val_bpt is None or comp_ratio is None:
         print("Error: Could not parse results from output!", file=sys.stderr)
         return
         
+    runtime_s = runtime_s if runtime_s is not None else 0.0
+    steps_per_sec = steps_per_sec if steps_per_sec is not None else 0.0
+
     print(f"\nExperiment Results:")
     print(f"Validation Loss: {val_loss:.6f}")
     print(f"Bits Per Token: {val_bpt:.6f}")
     print(f"Theoretical Compression Ratio: {comp_ratio:.6f}x")
+    print(f"Runtime: {runtime_s:.1f}s")
+    print(f"Throughput: {steps_per_sec:.2f} steps/sec")
     
     # 5. Check and update best score
     best_loss = None
@@ -160,7 +180,7 @@ def run_experiment():
     results_tsv = os.path.join(os.path.dirname(__file__), "results.tsv")
     if not os.path.exists(results_tsv):
         with open(results_tsv, 'w', encoding='utf-8') as f:
-            f.write("commit\tval_loss\tval_bpt\tcomp_ratio\tstatus\tdescription\n")
+            f.write("commit\tval_loss\tval_bpt\tcomp_ratio\truntime_s\tsteps_per_sec\tstatus\tdescription\n")
 
     # Get description from CLI argument
     description = sys.argv[1] if len(sys.argv) > 1 else "baseline"
@@ -186,7 +206,7 @@ def run_experiment():
             commit_hash = "unknown"
             
         with open(results_tsv, 'a', encoding='utf-8') as f:
-            f.write(f"{commit_hash}\t{val_loss:.6f}\t{val_bpt:.6f}\t{comp_ratio:.6f}\tkeep\t{description}\n")
+            f.write(f"{commit_hash}\t{val_loss:.6f}\t{val_bpt:.6f}\t{comp_ratio:.6f}\t{runtime_s:.1f}\t{steps_per_sec:.2f}\tkeep\t{description}\n")
 
         # Commit results.tsv and push to GitHub
         subprocess.run(["git", "add", tsv_path], check=True)
@@ -199,7 +219,7 @@ def run_experiment():
         print("Reverted train.py to last commit.")
         
         with open(results_tsv, 'a', encoding='utf-8') as f:
-            f.write(f"discard\t{val_loss:.6f}\t{val_bpt:.6f}\t{comp_ratio:.6f}\tdiscard\t{description}\n")
+            f.write(f"discard\t{val_loss:.6f}\t{val_bpt:.6f}\t{comp_ratio:.6f}\t{runtime_s:.1f}\t{steps_per_sec:.2f}\tdiscard\t{description}\n")
 
         # Commit results.tsv and push to GitHub
         subprocess.run(["git", "add", tsv_path], check=True)
