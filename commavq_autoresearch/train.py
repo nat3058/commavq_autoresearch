@@ -55,6 +55,39 @@ class FrameEmbedding(nn.Module):
             outputs.append(proj(emb[:, :, i, :]))
         return torch.cat(outputs, dim=-1) # (B, L, n_embd)
 
+class SpatialAttentionBlock(nn.Module):
+    def __init__(self, emb_dim, n_head=4):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(emb_dim)
+        self.qkv = nn.Linear(emb_dim, 3 * emb_dim, bias=False)
+        self.proj = nn.Linear(emb_dim, emb_dim, bias=False)
+        self.ln_2 = nn.LayerNorm(emb_dim)
+        hidden_dim = int(2 * emb_dim * 4 / 3)
+        self.w1 = nn.Linear(emb_dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(emb_dim, hidden_dim, bias=False)
+        self.w3 = nn.Linear(hidden_dim, emb_dim, bias=False)
+        self.n_head = n_head
+        self.scale = 1.0 / math.sqrt(emb_dim // n_head)
+        
+    def forward(self, x):
+        B_L, S, D = x.shape
+        h = self.ln_1(x)
+        q, k, v = self.qkv(h).chunk(3, dim=-1)
+        q = q.view(B_L, S, self.n_head, -1).transpose(1, 2)
+        k = k.view(B_L, S, self.n_head, -1).transpose(1, 2)
+        v = v.view(B_L, S, self.n_head, -1).transpose(1, 2)
+        
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = F.softmax(attn, dim=-1)
+        out = attn @ v
+        out = out.transpose(1, 2).contiguous().view(B_L, S, D)
+        x = x + self.proj(out)
+        
+        h = self.ln_2(x)
+        mlp_out = self.w3(F.silu(self.w1(h)) * self.w2(h))
+        x = x + mlp_out
+        return x
+
 
 class FrameHead(nn.Module):
     def __init__(self, n_embd, token_embd_dim, frame_dim=FRAME_DIM):
@@ -63,6 +96,7 @@ class FrameHead(nn.Module):
             nn.Linear(n_embd // N_GROUPS, (frame_dim // N_GROUPS) * token_embd_dim, bias=False)
             for _ in range(N_GROUPS)
         ])
+        self.spatial_attn = SpatialAttentionBlock(token_embd_dim, n_head=4)
         self.conv1 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
         self.gn1 = nn.GroupNorm(8, token_embd_dim)
         self.conv2 = nn.Conv2d(token_embd_dim, token_embd_dim, kernel_size=3, padding=1, bias=False)
@@ -81,7 +115,11 @@ class FrameHead(nn.Module):
             outputs.append(proj(x_chunks[i]))
         features = torch.cat(outputs, dim=-1) # (B, L, 128 * token_embd_dim)
         
-        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16)
+        # Spatial self-attention over the 128 positions
+        features = features.view(B * L, self.frame_dim, self.token_embd_dim)
+        features = self.spatial_attn(features)
+        
+        # Reshape to 2D spatial grid (B * L, token_embd_dim, 8, 16) for convolutions
         features = features.view(B * L, 8, 16, self.token_embd_dim).permute(0, 3, 1, 2)
         
         # Spatial coordination refinement (3 residual layers)
