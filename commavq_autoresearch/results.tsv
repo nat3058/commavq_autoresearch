@@ -68,3 +68,4 @@ eabf0a2	3.599793	5.193404	1.925519	keep	SSTC-OPT: Late decay at 75% steps with 1
 43d6baa	3.581682	5.167275	1.935256	keep	SSTC-OPT: Late decay at 75% steps with 2.2e-3 peak LR + Grad Clip 1.0
 35787b9	3.572740	5.154374	1.940100	keep	SSTC-OPT: Late decay at 75% steps with 2.3e-3 peak LR + Grad Clip 1.0
 7b11f75	3.568734	5.148595	1.942278	keep	SSTC-OPT: Late decay at 75% steps with 2.4e-3 peak LR + Grad Clip 1.0
+3952c22	3.567134	5.146287	1.943149	keep	SSTC-OPT: Late decay at 75% steps with 2.5e-3 peak LR + Grad Clip 1.0
