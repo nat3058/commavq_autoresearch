@@ -75,3 +75,4 @@ eabf0a2	3.599793	5.193404	1.925519	keep	SSTC-OPT: Late decay at 75% steps with 1
 discard	3.569922	5.150309	1.941631	discard	SSTC-GP: Grouped Linear Projections baseline (G=8, 3.55M params)
 d90a331	2.886602	4.164486	2.401257	keep	SSTC-GP-WIDE: Scale model to N_EMBD=768, N_HEAD=12 (8.87M params total)
 2d558d9	2.829563	4.082196	2.449662	keep	SSTC-GP-WIDE: Scale batch size to 128 and peak LR to 4.0e-3
+c4b72c6	2.823589	4.073578	2.454844	keep	SSTC-GP-WIDE: Adjust WEIGHT_DECAY to 0.02
