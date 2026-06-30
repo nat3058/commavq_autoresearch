@@ -20,7 +20,7 @@ N_EMBD = 768
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 128          # Batch size per GPU (effective batch size = 256)
 LEARNING_RATE = 4.0e-3
-WEIGHT_DECAY = 0.03
+WEIGHT_DECAY = 0.04
 N_GROUPS = 8
 
 
@@ -247,34 +247,47 @@ def train():
     t_start = time.time()
 
     # Dynamically measure and sync step budget
-    if not use_compile:
-        if master_process:
-            print("Calibrating training throughput dynamically...")
-        model.train()
-        t_cal_start = time.time()
-        for _ in range(10):
-            cx, cy = train_loader.get_batch()
-            optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast('cuda', dtype=torch.float16):
-                clogits = model(cx)
-                closs = F.cross_entropy(clogits.view(-1, clogits.size(-1)), cy.view(-1))
-            scaler.scale(closs).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        torch.cuda.synchronize()
-        calibration_elapsed = time.time() - t_cal_start
-        steps_per_sec = 10.0 / calibration_elapsed
-        if master_process:
-            print(f"Dynamic calibration: {steps_per_sec:.2f} steps/sec (calibration took {calibration_elapsed:.2f}s)")
-        step = 10
-    else:
-        calibration_elapsed = 0.0
-        steps_per_sec = 7.0
-        step = 0
-
+    if master_process:
+        print("Calibrating training throughput dynamically (with compile warmup)...")
+    model.train()
+    
+    # Run 5 steps to warm up and trigger compilation
+    for _ in range(5):
+        cx, cy = train_loader.get_batch()
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast('cuda', dtype=torch.float16):
+            clogits = model(cx)
+            closs = F.cross_entropy(clogits.view(-1, clogits.size(-1)), cy.view(-1))
+        scaler.scale(closs).backward()
+        scaler.step(optimizer)
+        scaler.update()
+    torch.cuda.synchronize()
+    
+    # Measure time for next 10 steps
+    t_cal_start = time.time()
+    for _ in range(10):
+        cx, cy = train_loader.get_batch()
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast('cuda', dtype=torch.float16):
+            clogits = model(cx)
+            closs = F.cross_entropy(clogits.view(-1, clogits.size(-1)), cy.view(-1))
+        scaler.scale(closs).backward()
+        scaler.step(optimizer)
+        scaler.update()
+    torch.cuda.synchronize()
+    
+    calibration_elapsed = time.time() - t_cal_start
+    steps_per_sec = 10.0 / calibration_elapsed
+    
+    if master_process:
+        print(f"Dynamic calibration: {steps_per_sec:.2f} steps/sec (10 steps took {calibration_elapsed:.2f}s)")
+    
+    step = 15
+    
     # Calculate step budget on Rank 0
     if master_process:
-        max_steps = int((TIME_BUDGET - calibration_elapsed) * steps_per_sec) + step
+        total_elapsed = time.time() - t_start
+        max_steps = int((TIME_BUDGET - total_elapsed) * steps_per_sec) + step
     else:
         max_steps = 0
 
