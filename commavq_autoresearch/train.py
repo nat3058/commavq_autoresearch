@@ -13,9 +13,9 @@ from prepare import MAX_SEQ_LEN, TIME_BUDGET, VOCAB_SIZE, FRAME_DIM, TRAIN_BIN, 
 # ---------------------------------------------------------------------------
 # Hyperparameters (agent modifies these)
 # ---------------------------------------------------------------------------
-N_LAYER = 12
-N_HEAD = 12
-N_EMBD = 768
+N_LAYER = 8
+N_HEAD = 10
+N_EMBD = 640
 
 TOKEN_EMBD_DIM = 64
 BATCH_SIZE = 128          # Batch size per GPU (effective batch size = 256)
